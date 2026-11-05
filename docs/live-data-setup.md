@@ -118,7 +118,10 @@ The `bmll` SDK (≥ 1.25) pins NumPy < 2 while SIMP's core uses NumPy 2, so the 
 ```bash
 cd connectors/bmll_puller
 uv sync
-export BMLL_KEY_PATH=/secure/path/to/bmll_ssh_private_key
+export BMLL_KEY_PATH=/secure/path/to/bmll_ssh_private_key   # <key>.pub must sit next to it
+export BMLL_USERNAME=<your BMLL API username>                # from data.bmlltech.com; not your Mac user@host
+# export BMLL_LAB_ORG_ID=<org id>                            # organisation / Data Lab accounts only
+uv run python puller.py --check-auth                          # must print: BMLL login OK
 uv run python puller.py --isins ../../isins.csv --start 2022-03-01 --end 2026-07-31 --out ../../../lake_staging/bmll
 cd ../..
 ```

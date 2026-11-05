@@ -20,6 +20,9 @@ Usage::
 
     uv run --project connectors/bmll_puller python connectors/bmll_puller/puller.py \\
         --isins isins.csv --start 2022-03-01 --end 2026-07-31 --out lake_staging/bmll
+
+Credentials (environment): BMLL_KEY_PATH (private key; <key>.pub next to it), BMLL_USERNAME
+(your BMLL API username), optional BMLL_KEY_PASSPHRASE and BMLL_LAB_ORG_ID. Test with --check-auth.
 """
 
 from __future__ import annotations
@@ -72,6 +75,52 @@ def _rename(df: pd.DataFrame, keep_volume: bool = False) -> pd.DataFrame:
     if keep_volume:
         m.pop("Volume", None)
     return df.rename(columns=m)
+
+
+def login() -> None:
+    """Log in explicitly, before any query, and fail with one clear message.
+
+    The SDK identifies you by an API *username*: BMLL_USERNAME, else the comment field of the
+    public key (``<BMLL_KEY_PATH>.pub``). A key made with plain ``ssh-keygen`` has the comment
+    ``user@host``, which BMLL rejects with 401, and the SDK's retry-on-401 then recurses until
+    RecursionError. Organisation (Lab) accounts also need BMLL_LAB_ORG_ID.
+    """
+    import os
+    import sys
+
+    import bmll
+
+    key = os.environ.get("BMLL_KEY_PATH")
+    if not key:
+        sys.exit("BMLL_KEY_PATH is not set (path to the private key registered with BMLL)")
+    priv = Path(key).expanduser()
+    pub = priv.with_suffix(".pub")
+    if not priv.exists():
+        sys.exit(f"private key not found: {priv}")
+    if not pub.exists():
+        sys.exit(f"public key not found: {pub} (the SDK needs both files in the same folder)")
+    parts = pub.read_text().split()
+    comment = parts[2] if len(parts) == 3 else None
+    user = os.environ.get("BMLL_USERNAME") or comment
+    org = os.environ.get("BMLL_LAB_ORG_ID")
+    print(f"BMLL login: username={user!r} ({'BMLL_USERNAME' if os.environ.get('BMLL_USERNAME') else 'public-key comment'}), "
+          f"key={priv}, lab_org_id={org!r}")
+    if not user:
+        sys.exit("no BMLL username: set BMLL_USERNAME to your API username (data.bmlltech.com, Data Delivery page)")
+    sys.setrecursionlimit(200)  # turn the SDK's 401 retry loop into a fast failure
+    try:
+        bmll.login(username=user, key_path=str(priv), passphrase=os.environ.get("BMLL_KEY_PASSPHRASE"), lab_org_id=org)
+    except RecursionError:
+        sys.exit(
+            "BMLL rejected the credentials (HTTP 401 on /auth/identity). Check:\n"
+            f"  1. BMLL_USERNAME is your BMLL API username (currently {user!r}), not your Mac user@host\n"
+            f"  2. the public key {pub} is the one registered on data.bmlltech.com\n"
+            "  3. for an organisation / Data Lab account, BMLL_LAB_ORG_ID is set\n"
+            "  4. BMLL_KEY_PASSPHRASE is set if the key has a passphrase"
+        )
+    finally:
+        sys.setrecursionlimit(3000)
+    print("BMLL login OK")
 
 
 def reference_by_isin(isins: list[str], start: date, end: date) -> pd.DataFrame:
@@ -154,11 +203,17 @@ def lab_job_spec(kind: str, dates: list[date], listing_ids: list[int], storage_u
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--isins", required=True, help="CSV from `simp data export-isins` (column isin)")
-    ap.add_argument("--start", required=True)
-    ap.add_argument("--end", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--check-auth", action="store_true", help="only test the BMLL login, then exit")
+    ap.add_argument("--isins", help="CSV from `simp data export-isins` (column isin)")
+    ap.add_argument("--start")
+    ap.add_argument("--end")
+    ap.add_argument("--out")
     a = ap.parse_args()
+    login()
+    if a.check_auth:
+        return
+    if not (a.isins and a.start and a.end and a.out):
+        ap.error("--isins, --start, --end and --out are required")
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     s, e = date.fromisoformat(a.start), date.fromisoformat(a.end)
