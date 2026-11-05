@@ -15,7 +15,29 @@ import polars as pl
 
 from simp.accounting.calendar import SessionCalendar
 from simp.data.lake.store import Lake
+from simp.data.mapping.isin import exch_to_mic
 from simp.errors import LookAheadError
+
+# Distribution types the engine understands: CD cash dividend, FS forward split, SO spin-off,
+# RI rights, MG merger/delisting. CRSP CIZ ``distype`` codes are mapped here; anything not
+# mapped is classified from the amounts, and an unclassifiable event becomes "UNK", which stops
+# the run if the fund holds the security (never silently ignored). Extend DISTYPE_MAP when a
+# release uses new codes.
+DISTYPE_MAP = {"CD": "CD", "FS": "FS", "SO": "SO", "RI": "RI", "MG": "MG"}
+
+
+def classify_distribution(r: dict[str, object]) -> str:
+    code = str(r.get("distype") or "").strip().upper()
+    if code in DISTYPE_MAP:
+        return DISTYPE_MAP[code]
+    amt = float(r.get("disdivamt") or 0.0)  # type: ignore[arg-type]
+    fac = float(r.get("disfacshr") or 0.0)  # type: ignore[arg-type]
+    if fac > 0 and amt == 0:
+        return "FS"
+    if amt > 0 and fac == 0:
+        return "CD"
+    return "UNK"
+
 
 VENUES = ["XNYS", "XNAS", "ARCX", "BATS", "EDGX", "IEXG", "MEMX", "DARK"]
 
@@ -140,7 +162,7 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
     member = np.zeros(shp, bool)
     sarr = np.array(sessions, dtype="datetime64[D]")
     mbr_start: dict[int, list[tuple[date, date]]] = {}
-    for p, a, b in mbr.iter_rows():
+    for p, a, b in mbr.with_columns(pl.col("mbrenddt").fill_null(date(9999, 12, 31))).iter_rows():
         if int(p) not in pos:
             continue
         mask = (sarr >= np.datetime64(a)) & (sarr <= np.datetime64(b))
@@ -177,7 +199,7 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
 
     secinfo = lake.read(snapshot, "crsp", "stksecurityinfohist").sort("secinfostartdt")
     tick = {int(p): t for p, t in secinfo.select("permno", "ticker").iter_rows()}
-    prim = {int(p): e for p, e in secinfo.select("permno", "primaryexch").iter_rows()}
+    prim = {int(p): exch_to_mic(e) for p, e in secinfo.select("permno", "primaryexch").iter_rows()}
     tickers = [tick.get(int(p), str(p)) for p in permnos]
     primary = [prim.get(int(p), "XNYS") for p in permnos]
 
@@ -195,7 +217,7 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
         p = int(r["permno"])
         if p not in pos or r["disexdt"] not in dpos:
             continue
-        kind = str(r["distype"])
+        kind = classify_distribution(r)
         actions.append(
             CorpAction(
                 j=pos[p],

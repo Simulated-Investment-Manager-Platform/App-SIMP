@@ -250,6 +250,12 @@ class Engine:
                         f"{self.cfg.exclusion_policy} does not omit it",
                         session=day,
                     )
+            elif a.kind == "UNK" and held != 0:
+                raise CorporateActionError(
+                    f"unclassified distribution on held permno {a.permno} (ex {a.ex}): add its CRSP distype code "
+                    "to DISTYPE_MAP in simp/data/market.py",
+                    session=day,
+                )
             elif a.kind == "MG" and held != 0:
                 raise CorporateActionError(
                     f"merger/delisting of held permno {a.permno}: no merger payoff is invented", session=day

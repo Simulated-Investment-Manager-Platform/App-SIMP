@@ -154,6 +154,8 @@ drill to a fill).
 
 ## Going live
 
+**Full step-by-step guide: [docs/live-data-setup.md](docs/live-data-setup.md)** (accounts, secrets, WRDS check, CRSP pull, BMLL puller, registration, review queues, golden replay, troubleshooting). In short:
+
 1. **WRDS.** Set `WRDS_USERNAME`/`WRDS_PASSWORD` on a host that can reach
    `wrds-pgdata.wharton.upenn.edu:9737`, then run `uv run simp data check-wrds`. This verifies the
    CIZ columns before any pull.

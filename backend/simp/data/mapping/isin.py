@@ -25,3 +25,19 @@ def isin_from_cusip9(cusip9: str, country: str = "US") -> str:
 
 def is_valid_isin(isin: str) -> bool:
     return len(isin) == 12 and isin_check_digit(isin[:11]) == isin[11]
+
+
+# CRSP primary exchange codes -> MIC of the primary listing (OPOL). MICs pass through unchanged.
+EXCH_TO_MIC = {
+    "N": "XNYS",
+    "Q": "XNAS",
+    "A": "XASE",
+    "P": "ARCX",
+    "Z": "BATS",
+}
+
+
+def exch_to_mic(code: str | None) -> str:
+    if not code:
+        return "XNYS"
+    return EXCH_TO_MIC.get(code.strip().upper(), code.strip().upper())

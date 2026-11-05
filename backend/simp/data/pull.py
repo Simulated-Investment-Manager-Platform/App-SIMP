@@ -91,20 +91,56 @@ def pull_synthetic(lake: Lake, seed: int) -> str:
     return lake.create_snapshot(SNAPSHOT_DATASETS)
 
 
-def pull_live(lake: Lake, start: date, end: date) -> str:
-    """CRSP from WRDS; BMLL from files staged by the isolated BMLL puller."""
+def _latest(lake: Lake, source: str, dataset: str) -> pl.DataFrame | None:
+    m = lake.latest_manifest(source, dataset)
+    if m is None:
+        return None
+    return pl.read_parquet([str(lake.root / f) for f in m["files"]])
+
+
+CRSP_DATASETS = ["dsf_v2", "stksecurityinfohist", "stkdistributions", "stkdelists", "dsp500list_v2", "dsp500"]
+
+
+def pull_crsp_only(lake: Lake, start: date, end: date) -> dict[str, int]:
+    """Step 1 of a live pull: CRSP from WRDS into the lake (needed to build the ISIN list for BMLL)."""
     from simp.data.crsp.wrds_loader import pull_crsp
 
     crsp = pull_crsp(start, end)
     write_raw(lake, crsp, "CRSP", {"start": str(start), "end": str(end)}, "wrds-ciz")
-    raw = dict(crsp)
-    for ds in ("reference_listing", "daily_analytics", "classified_trades", "auction_imbalance"):
-        m = lake.latest_manifest("bmll", ds)
-        if m is None:
+    return {f"{s}/{d}": df.height for (s, d), df in crsp.items()}
+
+
+def pull_live(lake: Lake, start: date, end: date, *, reuse_crsp: bool = False) -> str:
+    """CRSP from WRDS (or the last CRSP pull with ``reuse_crsp``); BMLL from files staged by the
+    isolated BMLL puller and registered with ``simp data register-bmll``."""
+    from simp.data.lake.contracts import CONTRACTS
+
+    if reuse_crsp:
+        raw: dict[tuple[str, str], pl.DataFrame] = {}
+        for ds in CRSP_DATASETS:
+            df = _latest(lake, "crsp", ds)
+            if df is None:
+                raise DataMissingError(
+                    f"no CRSP {ds} in the lake: run `simp data pull --source live --crsp-only` first"
+                )
+            raw[("crsp", ds)] = df
+    else:
+        pull_crsp_only(lake, start, end)
+        raw = {("crsp", ds): df for ds in CRSP_DATASETS if (df := _latest(lake, "crsp", ds)) is not None}
+    for ds in ("reference_listing", "daily_analytics", "classified_trades"):
+        df = _latest(lake, "bmll", ds)
+        if df is None:
             raise DataMissingError(
-                f"BMLL {ds} not pulled — run the BMLL puller then `simp data register-bmll`"
+                f"BMLL {ds} not pulled: run the BMLL puller, then `simp data register-bmll`"
             )
-        raw[("bmll", ds)] = pl.read_parquet([str(lake.root / f) for f in m["files"]])
+        raw[("bmll", ds)] = df
+    imb = _latest(lake, "bmll", "auction_imbalance")
+    if imb is None:
+        # Auction Imbalance detail is a Data Lab dataset; without it, imbalance falls back to zero
+        # (flagged by the empty dataset) and daily AuctionOrderImbalance metrics still feed the TCA.
+        c = CONTRACTS[("bmll", "auction_imbalance")]
+        imb = pl.DataFrame(schema=dict(c.columns))
+    raw[("bmll", "auction_imbalance")] = imb
     build_derived(lake, raw, "CRSP+BMLL", {"start": str(start), "end": str(end)})
     return lake.create_snapshot(
         [d for d in SNAPSHOT_DATASETS if d != ("vendor", "sp500_tr")]

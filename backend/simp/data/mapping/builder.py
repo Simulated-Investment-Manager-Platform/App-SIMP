@@ -14,7 +14,7 @@ from datetime import date
 
 import polars as pl
 
-from simp.data.mapping.isin import isin_from_cusip9
+from simp.data.mapping.isin import exch_to_mic, isin_from_cusip9
 from simp.errors import MappingError
 
 OPEN_END = date(9999, 12, 31)
@@ -72,7 +72,7 @@ def build_security_map(
         cands = [(r, "ISIN", 1.0) for r in by_isin.get(isin, [])]
         if not cands:
             for r in by_ticker.get(s["ticker"], []):
-                if r["OPOL"] != s["primaryexch"]:
+                if r["OPOL"] != exch_to_mic(s["primaryexch"]):
                     continue
                 # price cross-check on up to 5 sample days inside the overlap
                 ov = _overlap(s0, s1, r["ValidFrom"], r["ValidTo"])  # type: ignore[arg-type]

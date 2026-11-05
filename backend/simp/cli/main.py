@@ -54,6 +54,12 @@ def data_pull(
     seed: int = typer.Option(None, help="synthetic generator seed"),
     start: str = "2022-03-01",
     end: str = "2026-07-31",
+    crsp_only: bool = typer.Option(
+        False, help="live: pull CRSP from WRDS only (step 1, before the BMLL puller)"
+    ),
+    reuse_crsp: bool = typer.Option(
+        False, help="live: reuse the last CRSP pull instead of querying WRDS again"
+    ),
 ) -> None:
     """Pull CRSP (WRDS) + BMLL into the lake, build derived datasets, pin a snapshot."""
     from datetime import date
@@ -67,10 +73,20 @@ def data_pull(
     src = source or s.data_source
     t = time.time()
     lake = Lake()
+    if src == "live" and crsp_only:
+        from simp.data.pull import pull_crsp_only
+
+        _echo(
+            {
+                "crsp_rows": pull_crsp_only(lake, date.fromisoformat(start), date.fromisoformat(end)),
+                "next": "simp data export-isins, then run the BMLL puller",
+            }
+        )
+        return
     snap = (
         pull_synthetic(lake, seed or s.synthetic_seed)
         if src == "synthetic"
-        else pull_live(lake, date.fromisoformat(start), date.fromisoformat(end))
+        else pull_live(lake, date.fromisoformat(start), date.fromisoformat(end), reuse_crsp=reuse_crsp)
     )
     seed_reference()
     res = seed_reviews(snap)
@@ -90,7 +106,9 @@ def register_bmll(directory: Path) -> None:
         if not p.exists():
             typer.echo(f"skip {ds}: {p} not found")
             continue
-        df = pl.read_parquet(p)
+        from simp.data.lake.contracts import CONTRACTS, conform
+
+        df = conform(pl.read_parquet(p), CONTRACTS[("bmll", ds)])
         dcol = None if ds == "reference_listing" else "Date"
         m = lake.write(
             "bmll",
@@ -102,6 +120,53 @@ def register_bmll(directory: Path) -> None:
             data_label="BMLL",
         )
         typer.echo(f"{ds}: {m.row_count} rows, manifest {m.content_hash()[:12]}")
+
+
+@data_app.command("export-isins")
+def export_isins(out: Path = typer.Option(Path("isins.csv"))) -> None:
+    """Write the ISINs (US + CUSIP9 + check digit) of every CRSP security in the last CRSP pull,
+    for the BMLL puller's reference lookup."""
+    import polars as pl
+
+    from simp.data.lake.store import Lake
+    from simp.data.mapping.isin import isin_from_cusip9
+
+    lake = Lake()
+    m = lake.latest_manifest("crsp", "stksecurityinfohist")
+    if m is None:
+        raise typer.BadParameter(
+            "no CRSP pull in the lake: run `simp data pull --source live --crsp-only` first"
+        )
+    si = pl.read_parquet([str(lake.root / f) for f in m["files"]]).drop_nulls("cusip9")
+    rows = [
+        {"permno": p, "ticker": t, "isin": isin_from_cusip9(c), "primaryexch": x}
+        for p, t, c, x in si.select("permno", "ticker", "cusip9", "primaryexch").iter_rows()
+        if c and len(c) == 9
+    ]
+    pl.DataFrame(rows).unique("isin").write_csv(out)
+    typer.echo(f"wrote {out} ({len(rows)} ISIN rows)")
+
+
+@data_app.command("register-vendor-tr")
+def register_vendor_tr(csv: Path, source: str = "SP500_TR") -> None:
+    """Register the official S&P 500 Total Return series (benchmark b): CSV with caldt,tr_return."""
+    import polars as pl
+
+    from simp.data.lake.contracts import CONTRACTS, conform
+    from simp.data.lake.store import Lake
+
+    df = pl.read_csv(csv, try_parse_dates=True).with_columns(pl.lit(source).alias("source"))
+    df = conform(df, CONTRACTS[("vendor", "sp500_tr")])
+    m = Lake().write(
+        "vendor",
+        "sp500_tr",
+        df,
+        date_col="caldt",
+        query_args={"file": str(csv)},
+        sdk_version="vendor",
+        data_label="VENDOR",
+    )
+    typer.echo(f"sp500_tr: {m.row_count} rows, manifest {m.content_hash()[:12]}")
 
 
 @data_app.command("manifests")

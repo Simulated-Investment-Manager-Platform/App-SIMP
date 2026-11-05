@@ -77,16 +77,28 @@ class WrdsClient:
         return pl.DataFrame(rows, schema=cols, orient="row") if rows else pl.DataFrame(schema=cols)
 
     # ---------------------------------------------------------------- checks
+    def live_columns(self, dataset: str) -> set[str]:
+        schema, table, _ = TABLES[dataset]
+        return set(
+            self.fetch(
+                "select column_name from information_schema.columns where table_schema=%s and table_name=%s",
+                (schema, table),
+            )["column_name"].to_list()
+        )
+
     def check_schema(self, dataset: str) -> None:
         schema, table, _ = TABLES[dataset]
+        if dataset == "dsp500" and not self.live_columns(dataset):
+            TABLES["dsp500"] = ("crsp", "dsp500", "caldt")  # legacy SIZ location of the S&P 500 index file
+            schema, table, _ = TABLES[dataset]
         live = set(
             self.fetch(
                 "select column_name from information_schema.columns where table_schema=%s and table_name=%s",
                 (schema, table),
             )["column_name"].to_list()
         )
-        expected = set(CONTRACTS[("crsp", dataset)].columns)
-        missing = sorted(expected - live)
+        c = CONTRACTS[("crsp", dataset)]
+        missing = sorted(set(c.columns) - live - set(c.optional))
         if missing:
             raise SchemaMismatchError(
                 f"{schema}.{table} is missing documented columns {missing}; live has {sorted(live)}"
@@ -104,7 +116,7 @@ class WrdsClient:
     def table_for_permnos(self, dataset: str, permnos: Sequence[int], start: date, end: date) -> pl.DataFrame:
         self.check_schema(dataset)
         schema, table, dcol = TABLES[dataset]
-        cols = ", ".join(CONTRACTS[("crsp", dataset)].columns)
+        cols = ", ".join(sorted(set(CONTRACTS[("crsp", dataset)].columns) & self.live_columns(dataset)))
         frames = []
         for batch in _batches(sorted(permnos)):
             where = "permno = any(%s)"
@@ -124,6 +136,12 @@ class WrdsClient:
         )
 
 
+def _conform_all(raw: dict[tuple[str, str], pl.DataFrame]) -> dict[tuple[str, str], pl.DataFrame]:
+    from simp.data.lake.contracts import conform
+
+    return {k: conform(v, CONTRACTS[k]) for k, v in raw.items()}
+
+
 def pull_crsp(start: date, end: date) -> dict[tuple[str, str], pl.DataFrame]:
     """Pull every CRSP table the platform needs for S&P 500 members active in [start, end]."""
     w = WrdsClient()
@@ -138,4 +156,4 @@ def pull_crsp(start: date, end: date) -> dict[tuple[str, str], pl.DataFrame]:
     out = {("crsp", "dsp500list_v2"): mbr, ("crsp", "dsp500"): w.benchmark(start, end)}
     for ds in ("dsf_v2", "stksecurityinfohist", "stkdistributions", "stkdelists"):
         out[("crsp", ds)] = w.table_for_permnos(ds, permnos, start, end)
-    return out
+    return _conform_all(out)
