@@ -1,0 +1,6 @@
+[project]
+name = "simp-bmll-puller"
+version = "0.1.0"
+description = "Isolated BMLL SDK puller for SIMP (bmll pins numpy<2; the core uses numpy 2)"
+requires-python = ">=3.12,<3.13"
+dependencies = ["bmll>=1.25,<2", "pandas>=2.2,<2.3", "pyarrow>=18"]

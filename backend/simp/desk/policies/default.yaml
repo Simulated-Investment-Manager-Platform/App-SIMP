@@ -1,0 +1,37 @@
+# SIMP trading desk policy (spec: Trading desk policy). Rules are evaluated top to bottom;
+# the first rule whose `when` matches a PM order decides its trader orders.
+name: default
+version: 1
+desk_id: DESK_US_EQ
+expected_auction:
+  window: 20               # trailing sessions of LIT_CLOSING_AUCTION volume at the primary venue
+  statistic: median
+  event_date_multiple: prior   # on index-event dates scale up by this name's prior event-date multiple
+auction_spill_cap: 0.25    # MOC quantity above 25% of expected auction volume spills to continuous
+rules:
+  - name: flows-moc
+    when: {reason: [SUBSCRIPTION, REDEMPTION, CASH_SWEEP]}
+    then: [{strategy: MOC, broker: BRK_B}]
+  - name: small-basket-portfolio-trade
+    when: {instruction: TARGET_CLOSE, max_notional: 25000, basket: true}
+    then: [{strategy: PORTFOLIO_TRADE, broker: BRK_C}]
+  - name: target-close-fits-auction
+    when: {instruction: TARGET_CLOSE, max_pct_expected_auction: 0.05}
+    then: [{strategy: MOC, broker: BRK_B}]
+  - name: target-close-large
+    when: {instruction: TARGET_CLOSE}
+    then:
+      - {strategy: MOC, broker: BRK_B, pct_expected_auction: 0.05}
+      - {strategy: ALGO_VWAP, broker: BRK_A, window: ["13:00", "15:50"], remainder: true}
+  - name: vwap-day
+    when: {instruction: VWAP_DAY}
+    then: [{strategy: ALGO_VWAP, brokers: {BRK_A: 0.7, BRK_E: 0.3}, window: ["09:30", "15:50"], params: {pov_cap: 0.10}}]
+  - name: arrival-small
+    when: {instruction: ARRIVAL, max_pct_adv: 0.01}
+    then: [{strategy: ALGO_IS, broker: BRK_A, window: ["09:30", "11:30"]}]
+  - name: arrival-large
+    when: {instruction: ARRIVAL}
+    then: [{strategy: HIGH_TOUCH, broker: BRK_D, window: ["09:30", "15:50"]}]
+  - name: fallback
+    when: {}
+    then: [{strategy: MOC, broker: BRK_B}]
