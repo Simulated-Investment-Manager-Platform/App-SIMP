@@ -24,7 +24,7 @@ from typing import Any
 
 import polars as pl
 
-from simp.data.lake.contracts import CONTRACTS, check_contract
+from simp.data.lake.contracts import CONTRACTS, check_contract, conform
 from simp.errors import DataMissingError
 from simp.settings import get_settings
 
@@ -90,6 +90,7 @@ class Lake:
         data_label: str,
     ) -> Manifest:
         contract = CONTRACTS[(source, dataset)]
+        df = conform(df, contract)  # same typing/dedup rules for every source (WRDS, BMLL, synthetic)
         check_contract(df, contract)
         base = self.dataset_dir(source, dataset)
         files: dict[str, str] = {}
@@ -149,7 +150,10 @@ class Lake:
         sdir = self.root / "_snapshots"
         sdir.mkdir(parents=True, exist_ok=True)
         (sdir / f"{h}.json").write_text(
-            json.dumps({"snapshot_hash": h, "manifests": chosen, "created_at": datetime.now(UTC).isoformat()}, indent=1)
+            json.dumps(
+                {"snapshot_hash": h, "manifests": chosen, "created_at": datetime.now(UTC).isoformat()},
+                indent=1,
+            )
         )
         return h
 

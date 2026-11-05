@@ -57,3 +57,25 @@ def test_live_snapshot_from_staged_files(tmp_path) -> None:  # type: ignore[no-u
     md = lake.read(snap, "derived", "market_daily")
     assert md.height > 0 and (md["imbalance_qty"] == 0).all()
     assert lake.manifest_for(snap, "derived", "market_daily")["data_label"] == "CRSP+BMLL"
+
+
+def test_wrds_distributions_with_shared_ex_date_and_type() -> None:
+    """Real CIZ data: a regular and a special dividend share (permno, ex-date, type)."""
+    c = CONTRACTS[("crsp", "stkdistributions")]
+    base = {"permno": 14593, "disexdt": date(2024, 2, 9), "distype": "CD", "disfacpr": 0.0, "disfacshr": 0.0}
+    no_seq = pl.DataFrame(
+        [
+            {**base, "disdivamt": Decimal("0.24")},
+            {**base, "disdivamt": Decimal("1.00")},
+            {**base, "disdivamt": Decimal("1.00")},
+        ]
+    )  # last row is an exact duplicate
+    out = conform(no_seq, c)
+    check_contract(out, c)
+    assert out.height == 2 and sorted(out["disseqnbr"].to_list()) == [0, 1]
+    same_seq = pl.DataFrame(
+        [{**base, "disseqnbr": 1, "disdivamt": 0.24}, {**base, "disseqnbr": 1, "disdivamt": 1.0}]
+    )
+    out2 = conform(same_seq, c)
+    check_contract(out2, c)
+    assert out2.height == 2 and out2["disseqnbr"].n_unique() == 2

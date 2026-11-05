@@ -9,6 +9,7 @@ from sqlalchemy import Engine, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from simp.data.lake.store import Lake
+from simp.data.market import classify_distribution
 from simp.db import schema as S
 from simp.db.session import get_engine
 from simp.desk.policy import POLICY_DIR
@@ -119,19 +120,23 @@ def seed_reviews(snapshot: str, engine: Engine | None = None) -> dict[str, int]:
     auto = {"CD": "APPROVED", "FS": "APPROVED", "SO": "APPROVED", "RI": "PENDING", "MG": "UNSUPPORTED"}
     rows = []
     for r in dist.iter_rows(named=True):
-        st = auto.get(r["distype"], "PENDING")
+        kind = classify_distribution(r)  # engine type; the raw CIZ code is kept in source_ids
+        st = auto.get(kind, "PENDING")
         note = None
-        if r["distype"] == "CD" and r["dispaydt"] is None:
+        if kind == "CD" and r["dispaydt"] is None:
             note = "pay date missing: handled by the provisional dividend rule"
-        elif r["distype"] == "SO":
+        elif kind == "SO":
             note = "spin-off valued at CRSP distribution amount (keep_securities only)"
-        elif r["distype"] == "MG":
+        elif kind == "MG":
             note = "merger / delisting: no payoff invented; security excluded once declared"
+        elif kind == "UNK":
+            note = f"unclassified CRSP distype {r['distype']!r}: add it to DISTYPE_MAP (stops runs that hold the name)"
         rows.append(
             dict(
                 permno=int(r["permno"]),
                 ex_date=r["disexdt"],
-                type=r["distype"],
+                type=kind,
+                seq=int(r.get("disseqnbr") or 0),
                 pay_date=r["dispaydt"],
                 declared_date=r.get("disdeclaredt"),
                 amount=float(r["disdivamt"] or 0.0),
@@ -139,11 +144,11 @@ def seed_reviews(snapshot: str, engine: Engine | None = None) -> dict[str, int]:
                 review_status=st,
                 reviewed_by="auto" if st == "APPROVED" else None,
                 note=note,
-                source_ids={"crsp": "stkdistributions", "snapshot": snapshot[:12]},
+                source_ids={"crsp": "stkdistributions", "distype": r["distype"], "snapshot": snapshot[:12]},
             )
         )
     for k in range(0, len(rows), 2000):
-        _upsert(eng, S.corporate_action, rows[k : k + 2000], ["permno", "ex_date", "type"])
+        _upsert(eng, S.corporate_action, rows[k : k + 2000], ["permno", "ex_date", "type", "seq"])
     q = lake.root / "derived" / "security_map" / "review_queue.parquet"
     n_map = 0
     if q.exists():
