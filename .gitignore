@@ -8,9 +8,9 @@ __pycache__/
 .coverage
 htmlcov/
 # Data lake (licensed / generated data never committed)
-backend/lake/
-lake/
-lake_staging/
+/backend/lake/
+/lake/
+/lake_staging/
 *.parquet
 t3_job_*.json
 # Node
