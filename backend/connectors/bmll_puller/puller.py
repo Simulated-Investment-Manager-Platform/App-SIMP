@@ -123,17 +123,38 @@ def login() -> None:
     print("BMLL login OK")
 
 
+CHUNKS: Path | None = None  # set in main(): <out>/_chunks, one Parquet per finished batch (resume on restart)
+
+
+def _batched(name: str, items: list, size: int, fetch) -> pd.DataFrame:  # type: ignore[no-untyped-def]
+    """Run ``fetch`` per batch with progress output; each finished batch is saved and skipped on restart."""
+    import time
+
+    frames = []
+    n = (len(items) + size - 1) // size
+    t0 = time.time()
+    for k in range(n):
+        f = CHUNKS / f"{name}_{k:04d}.parquet" if CHUNKS else None
+        if f is not None and f.exists():
+            frames.append(pd.read_parquet(f))
+            print(f"  {name}: batch {k + 1}/{n} already done", flush=True)
+            continue
+        t = time.time()
+        df = fetch(items[k * size : (k + 1) * size])
+        if f is not None:
+            df.to_parquet(f)
+        frames.append(df)
+        done = time.time() - t0
+        eta = done / (k + 1) * (n - k - 1)
+        print(f"  {name}: batch {k + 1}/{n}, {len(df):,} rows in {time.time() - t:.0f}s, ETA ~{eta / 60:.0f} min", flush=True)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def reference_by_isin(isins: list[str], start: date, end: date) -> pd.DataFrame:
     import bmll
 
-    frames = []
-    for i in range(0, len(isins), 200):
-        frames.append(
-            bmll.reference.query(
-                start_date=start, end_date=end, object_type="Listing", ISIN=isins[i : i + 200]
-            )
-        )
-    ref = _rename(pd.concat(frames, ignore_index=True))
+    ref = _rename(_batched("reference", isins, 200, lambda b: bmll.reference.query(
+        start_date=start, end_date=end, object_type="Listing", ISIN=b)))
     if "ValidFrom" not in ref.columns:
         ref["ValidFrom"] = pd.Timestamp(start).date()
     if "ValidTo" not in ref.columns:
@@ -144,36 +165,16 @@ def reference_by_isin(isins: list[str], start: date, end: date) -> pd.DataFrame:
 def daily_analytics(listing_ids: list[int], start: date, end: date) -> pd.DataFrame:
     import bmll
 
-    frames = []
-    for i in range(0, len(listing_ids), 100):
-        frames.append(
-            bmll.time_series.query(
-                start_date=start,
-                end_date=end,
-                metric=DAILY_METRICS,
-                frequency="D",
-                object_ids=listing_ids[i : i + 100],
-                object_type="Listing",
-            )
-        )
-    return _rename(pd.concat(frames, ignore_index=True), keep_volume=True)
+    return _rename(_batched("daily_analytics", listing_ids, 25, lambda b: bmll.time_series.query(
+        start_date=start, end_date=end, metric=DAILY_METRICS, frequency="D", object_ids=b, object_type="Listing")),
+        keep_volume=True)
 
 
 def classified_trades(listing_ids: list[int], start: date, end: date) -> pd.DataFrame:
     import bmll
 
-    frames = []
-    for i in range(0, len(listing_ids), 100):
-        frames.append(
-            bmll.time_series.classified_trades(
-                start_date=start,
-                end_date=end,
-                object_ids=listing_ids[i : i + 100],
-                object_type="Listing",
-                notional_currency="USD",
-            )
-        )
-    return _rename(pd.concat(frames, ignore_index=True))
+    return _rename(_batched("classified_trades", listing_ids, 25, lambda b: bmll.time_series.classified_trades(
+        start_date=start, end_date=end, object_ids=b, object_type="Listing", notional_currency="USD")))
 
 
 def estimate_trades_plus(sip_listing_ids: list[int], day: date) -> object:
@@ -216,9 +217,13 @@ def main() -> None:
         ap.error("--isins, --start, --end and --out are required")
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    global CHUNKS
+    CHUNKS = out / "_chunks"
+    CHUNKS.mkdir(exist_ok=True)
     s, e = date.fromisoformat(a.start), date.fromisoformat(a.end)
     isins = pd.read_csv(a.isins)["isin"].dropna().astype(str).unique().tolist()
 
+    print(f"1/3 reference lookup for {len(isins)} ISINs", flush=True)
     ref = reference_by_isin(isins, s, e)
     ref.to_parquet(out / "reference_listing.parquet")
     prim = (
@@ -227,11 +232,13 @@ def main() -> None:
         else ref
     )
     lids = sorted(prim["ListingId"].astype(int).unique().tolist())
-    print(f"reference: {len(ref)} listing rows, {len(lids)} primary listings")
+    print(f"reference: {len(ref)} listing rows, {len(lids)} primary listings", flush=True)
 
+    print("2/3 daily analytics", flush=True)
     da = daily_analytics(lids, s, e)
     da.to_parquet(out / "daily_analytics.parquet")
     print(f"daily analytics: {len(da)} rows; columns {sorted(da.columns)}")
+    print("3/3 classified trades", flush=True)
     ct = classified_trades(lids, s, e)
     ct.to_parquet(out / "classified_trades.parquet")
     print(f"classified trades: {len(ct)} rows; columns {sorted(ct.columns)}")
