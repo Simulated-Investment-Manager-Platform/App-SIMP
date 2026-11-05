@@ -103,13 +103,22 @@ def login() -> None:
     comment = parts[2] if len(parts) == 3 else None
     user = os.environ.get("BMLL_USERNAME") or comment
     org = os.environ.get("BMLL_LAB_ORG_ID")
-    print(f"BMLL login: username={user!r} ({'BMLL_USERNAME' if os.environ.get('BMLL_USERNAME') else 'public-key comment'}), "
-          f"key={priv}, lab_org_id={org!r}")
+    print(
+        f"BMLL login: username={user!r} ({'BMLL_USERNAME' if os.environ.get('BMLL_USERNAME') else 'public-key comment'}), "
+        f"key={priv}, lab_org_id={org!r}"
+    )
     if not user:
-        sys.exit("no BMLL username: set BMLL_USERNAME to your API username (data.bmlltech.com, Data Delivery page)")
+        sys.exit(
+            "no BMLL username: set BMLL_USERNAME to your API username (data.bmlltech.com, Data Delivery page)"
+        )
     sys.setrecursionlimit(200)  # turn the SDK's 401 retry loop into a fast failure
     try:
-        bmll.login(username=user, key_path=str(priv), passphrase=os.environ.get("BMLL_KEY_PASSPHRASE"), lab_org_id=org)
+        bmll.login(
+            username=user,
+            key_path=str(priv),
+            passphrase=os.environ.get("BMLL_KEY_PASSPHRASE"),
+            lab_org_id=org,
+        )
     except RecursionError:
         sys.exit(
             "BMLL rejected the credentials (HTTP 401 on /auth/identity). Check:\n"
@@ -146,35 +155,99 @@ def _batched(name: str, items: list, size: int, fetch) -> pd.DataFrame:  # type:
         frames.append(df)
         done = time.time() - t0
         eta = done / (k + 1) * (n - k - 1)
-        print(f"  {name}: batch {k + 1}/{n}, {len(df):,} rows in {time.time() - t:.0f}s, ETA ~{eta / 60:.0f} min", flush=True)
+        print(
+            f"  {name}: batch {k + 1}/{n}, {len(df):,} rows in {time.time() - t:.0f}s, ETA ~{eta / 60:.0f} min",
+            flush=True,
+        )
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+REF_MICS = ["XNYS", "XNAS", "ARCX", "BATS", "XASE", "@SIP"]  # primary venues (OPOL) + consolidated tape
+
+
 def reference_by_isin(isins: list[str], start: date, end: date) -> pd.DataFrame:
+    """Listing reference data as validity intervals.
+
+    ``reference.query`` over a date range returns one row per listing per day (millions of rows
+    for four years), so instead query monthly snapshots on the primary venues + @SIP and collapse
+    them: each (ListingId, ISIN, Ticker) gets ValidFrom/ValidTo from the snapshots it appears in.
+    """
     import bmll
 
-    ref = _rename(_batched("reference", isins, 200, lambda b: bmll.reference.query(
-        start_date=start, end_date=end, object_type="Listing", ISIN=b)))
-    if "ValidFrom" not in ref.columns:
-        ref["ValidFrom"] = pd.Timestamp(start).date()
-    if "ValidTo" not in ref.columns:
-        ref["ValidTo"] = date(9999, 12, 31)
+    days = pd.bdate_range(start, end, freq="BMS").date.tolist()
+    if not days or days[0] != start:
+        days = [start, *days]
+    if days[-1] != end:
+        days.append(end)
+
+    def snapshot(day_batch: list[date]) -> pd.DataFrame:
+        d = day_batch[0]
+        frames = [
+            bmll.reference.query(
+                start_date=d, end_date=d, object_type="Listing", ISIN=isins[i : i + 200], MIC=REF_MICS
+            )
+            for i in range(0, len(isins), 200)
+        ]
+        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        df["SnapDate"] = d
+        return df
+
+    raw = _rename(_batched("reference", days, 1, snapshot))
+    keys = [c for c in ("ListingId", "ISIN", "Ticker") if c in raw.columns]
+    agg = (
+        raw.groupby(keys, dropna=False)
+        .agg(ValidFrom=("SnapDate", "min"), ValidTo=("SnapDate", "max"))
+        .reset_index()
+    )
+    # a listing seen in the first / last snapshot is valid from the window start / open-ended
+    nxt = {d: days[k + 1] for k, d in enumerate(days[:-1])}
+    agg["ValidFrom"] = agg["ValidFrom"].where(agg["ValidFrom"] != days[0], date(2015, 1, 1))
+    agg["ValidTo"] = [
+        date(9999, 12, 31) if v == days[-1] else nxt[v] - pd.Timedelta(days=1).to_pytimedelta()
+        for v in agg["ValidTo"]
+    ]
+    last = raw.drop(columns=[c for c in ("Date", "SnapDate") if c in raw.columns]).drop_duplicates(
+        keys, keep="last"
+    )
+    ref = agg.merge(last, on=keys, how="left")
+    print(f"  reference: {len(ref)} listing intervals from {len(days)} snapshots", flush=True)
     return ref
 
 
 def daily_analytics(listing_ids: list[int], start: date, end: date) -> pd.DataFrame:
     import bmll
 
-    return _rename(_batched("daily_analytics", listing_ids, 25, lambda b: bmll.time_series.query(
-        start_date=start, end_date=end, metric=DAILY_METRICS, frequency="D", object_ids=b, object_type="Listing")),
-        keep_volume=True)
+    return _rename(
+        _batched(
+            "daily_analytics",
+            listing_ids,
+            25,
+            lambda b: bmll.time_series.query(
+                start_date=start,
+                end_date=end,
+                metric=DAILY_METRICS,
+                frequency="D",
+                object_ids=b,
+                object_type="Listing",
+            ),
+        ),
+        keep_volume=True,
+    )
 
 
 def classified_trades(listing_ids: list[int], start: date, end: date) -> pd.DataFrame:
     import bmll
 
-    return _rename(_batched("classified_trades", listing_ids, 25, lambda b: bmll.time_series.classified_trades(
-        start_date=start, end_date=end, object_ids=b, object_type="Listing", notional_currency="USD")))
+    return _rename(
+        _batched(
+            "classified_trades",
+            listing_ids,
+            25,
+            lambda b: bmll.time_series.classified_trades(
+                start_date=start, end_date=end, object_ids=b, object_type="Listing", notional_currency="USD"
+            ),
+        )
+    )
 
 
 def estimate_trades_plus(sip_listing_ids: list[int], day: date) -> object:

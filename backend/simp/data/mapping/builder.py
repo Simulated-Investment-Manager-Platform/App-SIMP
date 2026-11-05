@@ -40,6 +40,14 @@ def build_security_map(
 ) -> MappingResult:
     ref = reference.with_columns(pl.col("ISIN").replace("", None))
     prim = ref.filter(pl.col("IsPrimary") & (pl.col("MIC") == pl.col("OPOL")))
+    # An ISIN (or ticker) identifies the listing; the listing itself is stable across identifier
+    # changes, so a matched listing is valid for its whole life, not only the identifier's interval.
+    life = {
+        int(lid): (a, b)
+        for lid, a, b in ref.group_by("ListingId")
+        .agg(pl.col("ValidFrom").min(), pl.col("ValidTo").max())
+        .iter_rows()
+    }
     sip = (
         ref.filter(pl.col("MIC") == "@SIP")
         .select("InstrumentId", "ListingId", "ValidFrom", "ValidTo")
@@ -89,7 +97,8 @@ def build_security_map(
                     cands.append((r, "TICKER_PRICE_CHECK", 0.9))
         placed = False
         for r, method, conf in cands:
-            ov = _overlap(s0, s1, r["ValidFrom"], r["ValidTo"])  # type: ignore[arg-type]
+            lf, lt = life.get(int(r["ListingId"]), (r["ValidFrom"], r["ValidTo"]))  # type: ignore[call-overload]
+            ov = _overlap(s0, s1, lf, lt)
             if ov is None:
                 continue
             sips = [
