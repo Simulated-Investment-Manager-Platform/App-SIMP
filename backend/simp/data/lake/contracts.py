@@ -140,6 +140,27 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
             "Volume": F64,
         },
         ("ListingId", "Date"),
+        # metric names / entitlements vary by account; a missing metric uses SIMP's declared fallback
+        optional=frozenset(
+            {
+                "MIC",
+                "VWAP",
+                "TWAP",
+                "ClosingAuctionPrice|Executed",
+                "OpeningAuctionPrice|Executed",
+                "Spread|RelTWA",
+                "Spread|RelVWA",
+                "Spread|AbsTWA",
+                "Volatility|Intraday",
+                "SweepToFill|25kUSDTWASpread",
+                "SweepToFill|100kUSDTWASpread",
+                "SweepToFill|250kUSDTWASpread",
+                "AuctionOrderImbalance|Abs",
+                "AuctionOrderImbalance|Notional",
+                "AuctionDislocation|ClosingLast",
+                "Volume",
+            }
+        ),
     ),
     ("bmll", "classified_trades"): Contract(
         1,

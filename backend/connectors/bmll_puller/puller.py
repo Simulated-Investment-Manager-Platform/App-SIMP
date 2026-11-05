@@ -214,25 +214,96 @@ def reference_by_isin(isins: list[str], start: date, end: date) -> pd.DataFrame:
     return ref
 
 
+# SIMP field -> keyword sets; the first BMLL daily metric whose name contains every keyword
+# of a set wins (exact name tried first). Names differ by BMLL release / entitlement, so they
+# are resolved against ``time_series.available`` instead of being hard-coded.
+METRIC_WANTS: dict[str, list[list[str]]] = {
+    "VWAP": [["vwap"]],
+    "TWAP": [["twap"]],
+    "ClosingAuctionPrice|Executed": [["closing", "auction", "price"], ["close", "auction", "price"]],
+    "OpeningAuctionPrice|Executed": [["opening", "auction", "price"], ["open", "auction", "price"]],
+    "Spread|RelTWA": [["spread", "rel", "twa"], ["spread", "relative", "time"], ["spread", "bps"]],
+    "Spread|RelVWA": [["spread", "rel", "vwa"], ["spread", "relative", "volume"]],
+    "Spread|AbsTWA": [["spread", "abs", "twa"], ["spread", "absolute"]],
+    "Volatility|Intraday": [["volatility", "intraday"], ["volatility"]],
+    "SweepToFill|25kUSDTWASpread": [["sweep", "25k"]],
+    "SweepToFill|100kUSDTWASpread": [["sweep", "100k"]],
+    "SweepToFill|250kUSDTWASpread": [["sweep", "250k"]],
+    "AuctionOrderImbalance|Abs": [["imbalance", "abs"], ["imbalance", "quantity"]],
+    "AuctionOrderImbalance|Notional": [["imbalance", "notional"]],
+    "AuctionDislocation|ClosingLast": [["dislocation", "clos"]],
+    "Volume": [["volume", "total"], ["volume"]],
+}
+METRIC_MAP: dict[str, str] = {}  # resolved: SIMP field -> BMLL metric name
+
+
+def resolve_metrics(listing_id: int, out: Path) -> dict[str, str]:
+    """Match SIMP's fields to the daily metrics BMLL offers for this account; print the table."""
+    import json
+
+    import bmll
+
+    av = bmll.time_series.available(object_id=listing_id)
+    av.to_csv(out / "available_metrics.csv", index=False)
+    if "frequency" in av.columns:
+        daily = av[av["frequency"].astype(str).str.upper().isin(["D", "DAILY", "1D"])]
+        av = daily if len(daily) else av
+    name_col = next(
+        (c for c in ("metric", "Metric", "name", "metric_name") if c in av.columns), av.columns[0]
+    )
+    names = sorted({str(x) for x in av[name_col].dropna()}, key=len)
+    override = out / "metric_map.json"
+    manual = json.loads(override.read_text()) if override.exists() else {}
+    resolved: dict[str, str] = {}
+    for field, sets in METRIC_WANTS.items():
+        if field in manual:
+            resolved[field] = manual[field]
+            continue
+        hit = next((n for n in names if n.lower() == field.lower()), None)
+        for kw in sets:
+            if hit:
+                break
+            hit = next(
+                (
+                    n
+                    for n in names
+                    if all(k in n.lower() for k in kw) and ("sweep" not in n.lower() or "sweep" in kw)
+                ),
+                None,
+            )
+        if hit:
+            resolved[field] = hit
+    print(f"  {len(names)} daily metrics available (full list: {out / 'available_metrics.csv'})", flush=True)
+    for field in METRIC_WANTS:
+        print(
+            f"    {field:32s} <- {resolved.get(field, 'NOT AVAILABLE (SIMP uses its fallback)')}", flush=True
+        )
+    print(
+        f'  to correct a match, write {override} with {{"SIMP field": "BMLL metric"}} and re-run', flush=True
+    )
+    return resolved
+
+
 def daily_analytics(listing_ids: list[int], start: date, end: date) -> pd.DataFrame:
     import bmll
 
-    return _rename(
-        _batched(
-            "daily_analytics",
-            listing_ids,
-            25,
-            lambda b: bmll.time_series.query(
-                start_date=start,
-                end_date=end,
-                metric=DAILY_METRICS,
-                frequency="D",
-                object_ids=b,
-                object_type="Listing",
-            ),
+    metrics = sorted(set(METRIC_MAP.values()))
+    if not metrics:
+        raise SystemExit("none of SIMP's daily metrics are available for this account")
+    import hashlib
+
+    tag = hashlib.md5(",".join(metrics).encode()).hexdigest()[:6]  # new metric set -> new batches
+    df = _batched(
+        f"daily_analytics_{tag}",
+        listing_ids,
+        25,
+        lambda b: bmll.time_series.query(
+            start_date=start, end_date=end, metric=metrics, frequency="D", object_ids=b, object_type="Listing"
         ),
-        keep_volume=True,
     )
+    df = _rename(df, keep_volume=True)
+    back = {bmll_name: field for field, bmll_name in METRIC_MAP.items()}
+    return df.rename(columns={c: back[c] for c in df.columns if c in back and back[c] not in df.columns})
 
 
 def classified_trades(listing_ids: list[int], start: date, end: date) -> pd.DataFrame:
@@ -308,6 +379,7 @@ def main() -> None:
     print(f"reference: {len(ref)} listing rows, {len(lids)} primary listings", flush=True)
 
     print("2/3 daily analytics", flush=True)
+    METRIC_MAP.update(resolve_metrics(lids[0], out))
     da = daily_analytics(lids, s, e)
     da.to_parquet(out / "daily_analytics.parquet")
     print(f"daily analytics: {len(da)} rows; columns {sorted(da.columns)}")
