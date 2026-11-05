@@ -14,6 +14,9 @@ x-backend: &backend
     SIMP_AUTH_MODE: ${SIMP_AUTH_MODE:-dev}
     SIMP_SESSION_SECRET: ${SIMP_SESSION_SECRET:-change-me}
     SIMP_WEB_ORIGIN: ${SIMP_WEB_ORIGIN:-http://localhost:3000}
+    SIMP_ALLOWED_USERS: ${SIMP_ALLOWED_USERS:-tanish:researcher,andrew:viewer,admin:admin}
+    SIMP_OAUTH_CLIENT_ID: ${SIMP_OAUTH_CLIENT_ID:-}
+    SIMP_OAUTH_CLIENT_SECRET: ${SIMP_OAUTH_CLIENT_SECRET:-}
   volumes:
     - lake:/lake
   depends_on: [db, redis]

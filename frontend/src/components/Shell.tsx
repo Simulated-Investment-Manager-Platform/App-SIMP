@@ -88,6 +88,24 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const path = usePathname() ?? "/";
   const me = useMe();
   const cov = useQuery({ queryKey: ["coverage-label"], queryFn: () => getJson("/data/coverage"), staleTime: 120_000 });
+  const status = (me.error as { status?: number } | null)?.status;
+  if (status === 401 || status === 403) {
+    // OAuth mode: not signed in, or not on the SIMP allow-list
+    return (
+      <div className="grid min-h-screen place-items-center px-4">
+        <div className="w-full max-w-sm rounded-xl border border-line bg-surface p-6 text-center">
+          <div className="mx-auto mb-3 grid h-9 w-9 place-items-center rounded-md bg-accent text-sm font-bold text-white">S</div>
+          <h1 className="text-lg font-semibold">Sign in to SIMP</h1>
+          <p className="mt-1 text-sm text-ink-2">
+            {status === 403 ? "Your account is not on the SIMP allow-list. Ask an admin to add you." : "Single-team access with an allow-list of users."}
+          </p>
+          <a href="/api/auth/login" className="mt-5 inline-flex h-9 items-center rounded-md bg-accent px-4 text-sm font-semibold text-white">
+            Sign in with GitHub
+          </a>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex min-h-screen">
       <Sidebar items={NAV} active={path} />

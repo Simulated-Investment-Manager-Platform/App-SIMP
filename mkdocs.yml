@@ -2,5 +2,6 @@ site_name: SIMP
 docs_dir: docs
 nav:
   - Overview: index.md
+  - Setup from zero: setup-from-zero.md
   - Live data setup: live-data-setup.md
   - Operations: operations.md

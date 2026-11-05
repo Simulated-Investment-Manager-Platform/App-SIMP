@@ -24,6 +24,8 @@ docker-compose.yml   Postgres 16, Redis 7, API, workers, web
 
 ## Quick start (local)
 
+**Step-by-step from an empty machine to the web app on live data: [docs/setup-from-zero.md](docs/setup-from-zero.md).**
+
 ```bash
 # backend
 cd backend
