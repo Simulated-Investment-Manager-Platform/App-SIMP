@@ -1,0 +1,5 @@
+site_name: SIMP
+docs_dir: docs
+nav:
+  - Overview: index.md
+  - Operations: operations.md

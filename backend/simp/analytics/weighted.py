@@ -26,7 +26,8 @@ def wquantile(x: np.ndarray, w: np.ndarray, q: float | list[float]) -> np.ndarra
     o = np.argsort(x)
     x, w = x[o], w[o]
     cw = (np.cumsum(w) - 0.5 * w) / w.sum()
-    return np.interp(np.atleast_1d(q), cw, x)
+    out: np.ndarray = np.interp(np.atleast_1d(q), cw, x)
+    return out
 
 
 def bucket(values: np.ndarray, edges: list[float], labels: list[str]) -> np.ndarray:
@@ -38,8 +39,15 @@ def bucket(values: np.ndarray, edges: list[float], labels: list[str]) -> np.ndar
     return out
 
 
-def block_bootstrap_ci(x: np.ndarray, w: np.ndarray, blocks: np.ndarray, *, n_boot: int = 2000, level: float = 0.90,
-                       seed: int = 7) -> tuple[float, float]:
+def block_bootstrap_ci(
+    x: np.ndarray,
+    w: np.ndarray,
+    blocks: np.ndarray,
+    *,
+    n_boot: int = 2000,
+    level: float = 0.90,
+    seed: int = 7,
+) -> tuple[float, float]:
     """CI of the notional-weighted mean, resampling whole blocks (dates) with replacement.
     With a single block, falls back to resampling orders."""
     m = np.isfinite(x) & np.isfinite(w) & (w > 0)

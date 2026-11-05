@@ -46,7 +46,9 @@ class IntradayService:
             opens = np.nan_to_num(md.opn[i], nan=1.0)
             last = np.nan_to_num(md.prc[i] / (1 + md.dislocation_bps[i] / 1e4), nan=1.0)
             sig = np.nan_to_num(md.vol_intraday[i], nan=0.015)
-            self._cache[i] = intraday_paths(int(md.data_seed or 0), md.sessions[i], np.maximum(opens, 1.0), np.maximum(last, 1.0), sig)
+            self._cache[i] = intraday_paths(
+                int(md.data_seed or 0), md.sessions[i], np.maximum(opens, 1.0), np.maximum(last, 1.0), sig
+            )
             if len(self._cache) > 8:
                 self._cache.pop(next(iter(self._cache)))
         return self._cache[i]
@@ -78,7 +80,7 @@ class IntradayService:
         h = zlib.crc32(f"{self.md.sessions[i]}:{j}:{sec}".encode()) / 2**32 - 0.5
         frac = (seconds_from_open % 60) / 60
         sig = float(np.nan_to_num(self.md.vol_intraday[i, j], nan=0.015)) / np.sqrt(N_MINUTES)
-        return base * (1 + 0.6 * sig * h * np.sqrt(frac * (1 - frac) + 1e-9) * 2)
+        return float(base * (1 + 0.6 * sig * h * np.sqrt(frac * (1 - frac) + 1e-9) * 2))
 
     def interval_vwap(self, i: int, j: int, t0: time, t1: time) -> tuple[float, bool]:
         p = self.paths(i)

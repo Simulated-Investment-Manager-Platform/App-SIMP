@@ -102,7 +102,9 @@ class MarketData:
             )
 
 
-def _matrix(df: pl.DataFrame, col: str, di: np.ndarray, ji: np.ndarray, shape: tuple[int, int], fill: float = np.nan) -> np.ndarray:
+def _matrix(
+    df: pl.DataFrame, col: str, di: np.ndarray, ji: np.ndarray, shape: tuple[int, int], fill: float = np.nan
+) -> np.ndarray:
     m = np.full(shape, fill)
     m[di, ji] = df[col].to_numpy().astype(float)
     return m
@@ -196,8 +198,14 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
         kind = str(r["distype"])
         actions.append(
             CorpAction(
-                j=pos[p], permno=p, kind=kind, ex_i=dpos[r["disexdt"]], ex=r["disexdt"], pay=r["dispaydt"],
-                declared=r.get("disdeclaredt"), amount=float(r["disdivamt"] or 0.0),
+                j=pos[p],
+                permno=p,
+                kind=kind,
+                ex_i=dpos[r["disexdt"]],
+                ex=r["disexdt"],
+                pay=r["dispaydt"],
+                declared=r.get("disdeclaredt"),
+                amount=float(r["disdivamt"] or 0.0),
                 factor=float(r["disfacshr"] or 0.0) + 1.0 if kind == "FS" else 1.0,
                 provisional=kind == "CD" and r["dispaydt"] is None,
             )
@@ -205,13 +213,41 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
     actions.sort(key=lambda a: (a.ex_i, a.permno, a.kind))
 
     return MarketData(
-        snapshot=snapshot, data_label=label, cal=cal, permnos=permnos, tickers=tickers, primary=primary,
-        listing_id=listing, prc=prc, ret=ret, retx=retx, shrout=shrout, volume=volume, opn=opn, member=member,
-        vwretd=vwretd, vwretx=vwretx, sp_tr=sp_tr,
-        vwap=M("vwap"), twap=M("twap"), auc_price=M("close_auction_price"), auc_vol=M("auction_volume", 0.0),
-        auc_med20=M("auc_median20"), imbalance=M("imbalance_qty", 0.0), adv20=M("adv20"), adv60=M("adv60"),
-        spread_bps=M("spread_bps", 5.0), vol_intraday=M("vol_intraday", 0.015), sweep_bps=M("sweep_100k_bps", 10.0),
-        dislocation_bps=M("dislocation_bps", 0.0), auc_price_fb=M("auction_price_fallback", 0.0) > 0,
-        auc_vol_fb=M("auction_volume_fallback", 0.0) > 0, venue_share=vshare, actions=actions, mapped=mapped,
-        mbr_start=mbr_start, pos=pos, data_seed=data_seed,
+        snapshot=snapshot,
+        data_label=label,
+        cal=cal,
+        permnos=permnos,
+        tickers=tickers,
+        primary=primary,
+        listing_id=listing,
+        prc=prc,
+        ret=ret,
+        retx=retx,
+        shrout=shrout,
+        volume=volume,
+        opn=opn,
+        member=member,
+        vwretd=vwretd,
+        vwretx=vwretx,
+        sp_tr=sp_tr,
+        vwap=M("vwap"),
+        twap=M("twap"),
+        auc_price=M("close_auction_price"),
+        auc_vol=M("auction_volume", 0.0),
+        auc_med20=M("auc_median20"),
+        imbalance=M("imbalance_qty", 0.0),
+        adv20=M("adv20"),
+        adv60=M("adv60"),
+        spread_bps=M("spread_bps", 5.0),
+        vol_intraday=M("vol_intraday", 0.015),
+        sweep_bps=M("sweep_100k_bps", 10.0),
+        dislocation_bps=M("dislocation_bps", 0.0),
+        auc_price_fb=M("auction_price_fallback", 0.0) > 0,
+        auc_vol_fb=M("auction_volume_fallback", 0.0) > 0,
+        venue_share=vshare,
+        actions=actions,
+        mapped=mapped,
+        mbr_start=mbr_start,
+        pos=pos,
+        data_seed=data_seed,
     )

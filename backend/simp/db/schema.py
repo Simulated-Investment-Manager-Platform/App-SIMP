@@ -31,7 +31,8 @@ PX = Numeric(20, 6)
 USD = Numeric(24, 6)
 
 users = Table(
-    "users", metadata,
+    "users",
+    metadata,
     Column("username", String(64), primary_key=True),
     Column("role", String(16), nullable=False),
     Column("display_name", String(128)),
@@ -40,7 +41,8 @@ users = Table(
 )
 
 fund = Table(
-    "fund", metadata,
+    "fund",
+    metadata,
     Column("fund_id", String(64), primary_key=True),
     Column("name", String(256), nullable=False),
     Column("strategy_type", String(16), nullable=False),
@@ -54,7 +56,8 @@ fund = Table(
 )
 
 broker = Table(
-    "broker", metadata,
+    "broker",
+    metadata,
     Column("broker_id", String(32), primary_key=True),
     Column("name", String(128), nullable=False),
     Column("commission_bps", Float, nullable=False),
@@ -65,16 +68,21 @@ broker = Table(
 desk = Table("desk", metadata, Column("desk_id", String(32), primary_key=True), Column("name", String(128)))
 
 venue = Table(
-    "venue", metadata,
+    "venue",
+    metadata,
     Column("mic", String(8), primary_key=True),
     Column("name", String(128)),
     Column("kind", String(16)),
     Column("supports_auction", Boolean),
-    Column("fee_remove", Float), Column("fee_add", Float), Column("fee_auction", Float), Column("fee_midpoint", Float),
+    Column("fee_remove", Float),
+    Column("fee_add", Float),
+    Column("fee_auction", Float),
+    Column("fee_midpoint", Float),
 )
 
 desk_policy = Table(
-    "desk_policy", metadata,
+    "desk_policy",
+    metadata,
     Column("name", String(64), primary_key=True),
     Column("yaml", Text, nullable=False),
     Column("updated_by", String(64)),
@@ -82,7 +90,8 @@ desk_policy = Table(
 )
 
 run = Table(
-    "run", metadata,
+    "run",
+    metadata,
     Column("run_id", String(26), primary_key=True),
     Column("fund_id", String(64), ForeignKey("fund.fund_id"), nullable=False),
     Column("name", String(256)),
@@ -107,7 +116,8 @@ run = Table(
 )
 
 run_event = Table(
-    "run_event", metadata,
+    "run_event",
+    metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("ts", TS, nullable=False),
@@ -117,7 +127,8 @@ run_event = Table(
 )
 
 study = Table(
-    "study", metadata,
+    "study",
+    metadata,
     Column("study_id", String(26), primary_key=True),
     Column("kind", String(32), nullable=False),  # counterfactual_chain | sensitivity
     Column("name", String(256)),
@@ -128,7 +139,8 @@ study = Table(
 )
 
 decision = Table(
-    "decision", metadata,
+    "decision",
+    metadata,
     Column("decision_id", String(26), primary_key=True),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("fund_id", String(64), nullable=False),
@@ -141,18 +153,23 @@ decision = Table(
 )
 
 target_weight = Table(
-    "target_weight", metadata,
+    "target_weight",
+    metadata,
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), primary_key=True),
-    Column("decision_id", String(26), ForeignKey("decision.decision_id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "decision_id", String(26), ForeignKey("decision.decision_id", ondelete="CASCADE"), primary_key=True
+    ),
     Column("permno", Integer, primary_key=True),
     Column("weight", Float, nullable=False),
     Column("weight_source", String(32)),
     Column("excluded_flag", Boolean, nullable=False),
     Column("exclusion_reason", Text),
+    Index("ix_tw_decision", "decision_id"),
 )
 
 pm_order = Table(
-    "pm_order", metadata,
+    "pm_order",
+    metadata,
     Column("pm_order_id", String(26), primary_key=True),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("fund_id", String(64), nullable=False),
@@ -181,10 +198,12 @@ pm_order = Table(
     CheckConstraint("decision_ts <= deadline_ts", name="ck_pm_ts"),
     Index("ix_pm_run_date", "run_id", "exec_date"),
     Index("ix_pm_run_permno", "run_id", "permno"),
+    Index("ix_pm_decision", "decision_id"),
 )
 
 program = Table(
-    "program", metadata,
+    "program",
+    metadata,
     Column("program_id", String(26), primary_key=True),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("broker_id", String(32), ForeignKey("broker.broker_id"), nullable=False),
@@ -192,10 +211,12 @@ program = Table(
     Column("n_orders", Integer, nullable=False),
     Column("notional", USD, nullable=False),
     Column("fee_bps", Float, nullable=False),
+    Index("ix_program_run", "run_id"),
 )
 
 trader_order = Table(
-    "trader_order", metadata,
+    "trader_order",
+    metadata,
     Column("trader_order_id", String(26), primary_key=True),
     Column("pm_order_id", String(26), ForeignKey("pm_order.pm_order_id", ondelete="CASCADE"), nullable=False),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
@@ -215,12 +236,19 @@ trader_order = Table(
     CheckConstraint("start_ts <= end_ts", name="ck_to_window"),
     Index("ix_to_pm", "pm_order_id"),
     Index("ix_to_run", "run_id"),
+    Index("ix_to_program", "program_id"),
 )
 
 child_order = Table(
-    "child_order", metadata,
+    "child_order",
+    metadata,
     Column("child_order_id", String(26), primary_key=True),
-    Column("trader_order_id", String(26), ForeignKey("trader_order.trader_order_id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "trader_order_id",
+        String(26),
+        ForeignKey("trader_order.trader_order_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("broker_id", String(32), ForeignKey("broker.broker_id"), nullable=False),
     Column("venue_mic", String(8), ForeignKey("venue.mic"), nullable=False),
@@ -231,13 +259,25 @@ child_order = Table(
     Column("tif", String(9), nullable=False),
     Column("status", String(10), nullable=False),
     Index("ix_child_to", "trader_order_id"),
+    Index("ix_child_run", "run_id"),
 )
 
 fill = Table(
-    "fill", metadata,
+    "fill",
+    metadata,
     Column("fill_id", String(26), primary_key=True),
-    Column("child_order_id", String(26), ForeignKey("child_order.child_order_id", ondelete="CASCADE"), nullable=False),
-    Column("trader_order_id", String(26), ForeignKey("trader_order.trader_order_id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "child_order_id",
+        String(26),
+        ForeignKey("child_order.child_order_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "trader_order_id",
+        String(26),
+        ForeignKey("trader_order.trader_order_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
     Column("pm_order_id", String(26), ForeignKey("pm_order.pm_order_id", ondelete="CASCADE"), nullable=False),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("broker_id", String(32), ForeignKey("broker.broker_id"), nullable=False),
@@ -256,10 +296,13 @@ fill = Table(
     CheckConstraint("quantity > 0", name="ck_fill_qty_pos"),
     Index("ix_fill_to", "trader_order_id"),
     Index("ix_fill_run", "run_id"),
+    Index("ix_fill_child", "child_order_id"),
+    Index("ix_fill_pm", "pm_order_id"),
 )
 
 ledger_entry = Table(
-    "ledger_entry", metadata,
+    "ledger_entry",
+    metadata,
     Column("entry_id", String(26), primary_key=True),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("fund_id", String(64), nullable=False),
@@ -274,7 +317,8 @@ ledger_entry = Table(
 )
 
 flow = Table(
-    "flow", metadata,
+    "flow",
+    metadata,
     Column("flow_id", String(26), primary_key=True),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("fund_id", String(64), nullable=False),
@@ -288,19 +332,32 @@ flow = Table(
 )
 
 nav_daily = Table(
-    "nav_daily", metadata,
+    "nav_daily",
+    metadata,
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), primary_key=True),
     Column("date", Date, primary_key=True),
     Column("fund_id", String(64), nullable=False),
-    Column("cash", USD), Column("equity_value", USD), Column("receivables", USD), Column("payables", USD),
-    Column("nav", USD, nullable=False), Column("units", Numeric(24, 8)), Column("unit_nav", Numeric(20, 10)),
-    Column("fund_return", Float), Column("gross_return", Float), Column("flow_usd", USD),
-    Column("bench_return_tr", Float), Column("bench_return_pr", Float), Column("bench_return_official", Float),
-    Column("cash_weight", Float), Column("fees_usd", USD), Column("trading_cost_usd", USD),
+    Column("cash", USD),
+    Column("equity_value", USD),
+    Column("receivables", USD),
+    Column("payables", USD),
+    Column("nav", USD, nullable=False),
+    Column("units", Numeric(24, 8)),
+    Column("unit_nav", Numeric(20, 10)),
+    Column("fund_return", Float),
+    Column("gross_return", Float),
+    Column("flow_usd", USD),
+    Column("bench_return_tr", Float),
+    Column("bench_return_pr", Float),
+    Column("bench_return_official", Float),
+    Column("cash_weight", Float),
+    Column("fees_usd", USD),
+    Column("trading_cost_usd", USD),
 )
 
 position_daily = Table(
-    "position_daily", metadata,
+    "position_daily",
+    metadata,
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), primary_key=True),
     Column("date", Date, primary_key=True),
     Column("permno", Integer, primary_key=True),
@@ -311,7 +368,8 @@ position_daily = Table(
 )
 
 benchmark_daily = Table(
-    "benchmark_daily", metadata,
+    "benchmark_daily",
+    metadata,
     Column("benchmark_id", String(32), primary_key=True),
     Column("date", Date, primary_key=True),
     Column("return_tr", Float),
@@ -321,7 +379,8 @@ benchmark_daily = Table(
 )
 
 corporate_action = Table(
-    "corporate_action", metadata,
+    "corporate_action",
+    metadata,
     Column("permno", Integer, primary_key=True),
     Column("ex_date", Date, primary_key=True),
     Column("type", String(4), primary_key=True),
@@ -336,7 +395,8 @@ corporate_action = Table(
 )
 
 mapping_review = Table(
-    "mapping_review", metadata,
+    "mapping_review",
+    metadata,
     Column("permno", Integer, primary_key=True),
     Column("valid_from", Date, primary_key=True),
     Column("ticker", String(16)),
@@ -350,7 +410,8 @@ mapping_review = Table(
 )
 
 data_job = Table(
-    "data_job", metadata,
+    "data_job",
+    metadata,
     Column("job_id", String(26), primary_key=True),
     Column("kind", String(32), nullable=False),
     Column("source", String(16), nullable=False),
@@ -364,7 +425,8 @@ data_job = Table(
 )
 
 netting = Table(
-    "netting", metadata,
+    "netting",
+    metadata,
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), primary_key=True),
     Column("date", Date, primary_key=True),
     Column("permno", Integer, primary_key=True),
@@ -374,9 +436,12 @@ netting = Table(
 )
 
 tca_order = Table(
-    "tca_order", metadata,
+    "tca_order",
+    metadata,
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), primary_key=True),
-    Column("pm_order_id", String(26), ForeignKey("pm_order.pm_order_id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "pm_order_id", String(26), ForeignKey("pm_order.pm_order_id", ondelete="CASCADE"), primary_key=True
+    ),
     Column("date", Date, nullable=False),
     Column("permno", Integer, nullable=False),
     Column("ticker", String(16)),
@@ -386,40 +451,78 @@ tca_order = Table(
     Column("main_strategy", String(16)),
     Column("main_broker", String(32)),
     Column("main_venue", String(8)),
-    Column("quantity", QTY), Column("filled_qty", QTY), Column("notional", USD), Column("exec_notional", USD),
-    Column("decision_price", PX), Column("arrival_price", PX), Column("avg_price", PX), Column("close_price", PX),
-    Column("vwap_day", PX), Column("vwap_interval", PX),
-    Column("is_bps", Float), Column("delay_bps", Float), Column("execution_bps", Float), Column("explicit_bps", Float),
-    Column("opportunity_bps", Float), Column("exec_cost_bps", Float),
-    Column("slip_close_bps", Float), Column("slip_vwap_bps", Float), Column("slip_arrival_bps", Float), Column("slip_benchmark_bps", Float),
-    Column("pct_adv", Float), Column("pct_auction", Float), Column("pct_exp_auction", Float), Column("spread_bps", Float),
-    Column("vol_intraday", Float), Column("imbalance_side", String(4)), Column("imbalance_notional", USD),
-    Column("size_bucket", String(12)), Column("auction_bucket", String(12)),
-    Column("auction_share", Float), Column("passive_share", Float),
-    Column("markout_1s", Float), Column("markout_5s", Float), Column("markout_60s", Float), Column("markout_300s", Float),
+    Column("quantity", QTY),
+    Column("filled_qty", QTY),
+    Column("notional", USD),
+    Column("exec_notional", USD),
+    Column("decision_price", PX),
+    Column("arrival_price", PX),
+    Column("avg_price", PX),
+    Column("close_price", PX),
+    Column("vwap_day", PX),
+    Column("vwap_interval", PX),
+    Column("is_bps", Float),
+    Column("delay_bps", Float),
+    Column("execution_bps", Float),
+    Column("explicit_bps", Float),
+    Column("opportunity_bps", Float),
+    Column("exec_cost_bps", Float),
+    Column("slip_close_bps", Float),
+    Column("slip_vwap_bps", Float),
+    Column("slip_arrival_bps", Float),
+    Column("slip_benchmark_bps", Float),
+    Column("pct_adv", Float),
+    Column("pct_auction", Float),
+    Column("pct_exp_auction", Float),
+    Column("spread_bps", Float),
+    Column("vol_intraday", Float),
+    Column("imbalance_side", String(4)),
+    Column("imbalance_notional", USD),
+    Column("size_bucket", String(12)),
+    Column("auction_bucket", String(12)),
+    Column("auction_share", Float),
+    Column("passive_share", Float),
+    Column("markout_1s", Float),
+    Column("markout_5s", Float),
+    Column("markout_60s", Float),
+    Column("markout_300s", Float),
     Column("next_open_vs_close_bps", Float),
-    Column("fees_usd", USD), Column("commission_usd", USD), Column("cost_usd", USD),
+    Column("fees_usd", USD),
+    Column("commission_usd", USD),
+    Column("cost_usd", USD),
     Column("flags", J),
     Column("answer_key", J),
     Index("ix_tca_run_date", "run_id", "date"),
+    Index("ix_tca_pm", "pm_order_id"),
 )
 
 reprice = Table(
-    "reprice", metadata,
+    "reprice",
+    metadata,
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), primary_key=True),
-    Column("pm_order_id", String(26), ForeignKey("pm_order.pm_order_id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "pm_order_id", String(26), ForeignKey("pm_order.pm_order_id", ondelete="CASCADE"), primary_key=True
+    ),
     Column("date", Date, nullable=False),
-    Column("t0_price", PX), Column("t0_bps", Float),
-    Column("moc_price", PX), Column("moc_bps", Float), Column("moc_vs_close_bps", Float),
-    Column("vwap_price", PX), Column("vwap_bps", Float),
-    Column("arrival_price", PX), Column("arrival_bps", Float),
-    Column("handoff_price", PX), Column("handoff_bps", Float),
+    Column("t0_price", PX),
+    Column("t0_bps", Float),
+    Column("moc_price", PX),
+    Column("moc_bps", Float),
+    Column("moc_vs_close_bps", Float),
+    Column("vwap_price", PX),
+    Column("vwap_bps", Float),
+    Column("arrival_price", PX),
+    Column("arrival_bps", Float),
+    Column("handoff_price", PX),
+    Column("handoff_bps", Float),
     Column("notional", USD),
     Index("ix_reprice_run_date", "run_id", "date"),
+    Index("ix_reprice_pm", "pm_order_id"),
 )
 
 ca_event = Table(
-    "ca_event", metadata,
+    "ca_event",
+    metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("run_id", String(26), ForeignKey("run.run_id", ondelete="CASCADE"), nullable=False),
     Column("date", Date, nullable=False),
@@ -434,7 +537,8 @@ ca_event = Table(
 )
 
 export = Table(
-    "export", metadata,
+    "export",
+    metadata,
     Column("export_id", String(26), primary_key=True),
     Column("run_id", String(26)),
     Column("table_name", String(64)),

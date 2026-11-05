@@ -24,3 +24,5 @@ frontend/playwright-report/
 .env
 .env.*
 !.env.example
+dump.rdb
+*.rdb

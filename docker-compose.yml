@@ -1,0 +1,51 @@
+# Full SIMP stack: Postgres 16, Redis 7, API, run/data workers, web.
+#   docker compose up -d --build
+#   docker compose run --rm api simp db upgrade
+#   docker compose run --rm api simp data pull            # synthetic by default; SIMP_DATA_SOURCE=live for WRDS+BMLL
+# Secrets (WRDS_USERNAME / WRDS_PASSWORD, BMLL key) come from the environment / secret store and
+# reach only the worker containers.
+x-backend: &backend
+  build: ./backend
+  environment:
+    SIMP_DATABASE_URL: postgresql+psycopg://simp:simp@db:5432/simp
+    SIMP_REDIS_URL: redis://redis:6379/0
+    SIMP_LAKE_ROOT: /lake
+    SIMP_DATA_SOURCE: ${SIMP_DATA_SOURCE:-synthetic}
+    SIMP_AUTH_MODE: ${SIMP_AUTH_MODE:-dev}
+    SIMP_SESSION_SECRET: ${SIMP_SESSION_SECRET:-change-me}
+    SIMP_WEB_ORIGIN: ${SIMP_WEB_ORIGIN:-http://localhost:3000}
+  volumes:
+    - lake:/lake
+  depends_on: [db, redis]
+
+services:
+  db:
+    image: postgres:16
+    environment: { POSTGRES_USER: simp, POSTGRES_PASSWORD: simp, POSTGRES_DB: simp }
+    volumes: [pg:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+  api:
+    <<: *backend
+    ports: ["8000:8000"]
+  worker:
+    <<: *backend
+    command: ["dramatiq", "simp.runs.worker", "--queues", "runs", "data", "-p", "4", "-t", "1"]
+    environment:
+      SIMP_DATABASE_URL: postgresql+psycopg://simp:simp@db:5432/simp
+      SIMP_REDIS_URL: redis://redis:6379/0
+      SIMP_LAKE_ROOT: /lake
+      SIMP_DATA_SOURCE: ${SIMP_DATA_SOURCE:-synthetic}
+      WRDS_USERNAME: ${WRDS_USERNAME:-}
+      WRDS_PASSWORD: ${WRDS_PASSWORD:-}
+      BMLL_KEY_PATH: ${BMLL_KEY_PATH:-}
+  web:
+    build: { context: ./frontend, args: { SIMP_API_URL: http://api:8000 } }
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+volumes:
+  pg: {}
+  lake: {}

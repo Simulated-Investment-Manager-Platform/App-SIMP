@@ -12,7 +12,7 @@ from simp.logging import configure_logging
 from simp.settings import get_settings
 
 configure_logging()
-broker = RedisBroker(url=get_settings().redis_url)
+broker = RedisBroker(url=get_settings().redis_url)  # type: ignore[no-untyped-call]
 dramatiq.set_broker(broker)
 
 

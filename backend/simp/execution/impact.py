@@ -25,4 +25,4 @@ def arrival_is_bps(q: float, adv: float, sigma_d: float, spread_bps: float, p: C
 def auction_impact_bps(q: float, v_auc: float, sigma_d: float, same_side: bool, p: CostModelParams) -> float:
     if v_auc <= 0 or q <= 0:
         return 0.0
-    return p.kappa * sigma_d * (q / v_auc) ** p.beta * (1 + p.lam * (1.0 if same_side else 0.0)) * 1e4
+    return float(p.kappa * sigma_d * (q / v_auc) ** p.beta * (1 + p.lam * (1.0 if same_side else 0.0)) * 1e4)

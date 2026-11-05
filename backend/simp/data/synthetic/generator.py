@@ -153,7 +153,7 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
     yld = rca.uniform(0.005, 0.04, N)
     month_off = rca.integers(0, 3, N)
     day_off = rca.integers(1, 25, N)
-    for j in np.where(payers)[0]:
+    for j in (int(x) for x in np.where(payers)[0]):
         for y in range(start.year, end.year + 1):
             for q in range(4):
                 m = 1 + q * 3 + int(month_off[j])
@@ -170,13 +170,21 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
                 pay = None if provisional else ex + timedelta(days=int(rca.integers(12, 35)))
                 rec = ex if ex >= date(2024, 5, 28) else cal.offset(ex, 1) if i + 1 < D else ex
                 dist_rows.append(
-                    dict(permno=int(permnos[j]), disexdt=ex, dispaydt=pay, disrecorddt=rec,
-                         disdeclaredt=ex - timedelta(days=int(rca.integers(20, 45))),
-                         disdivamt=amt, disfacpr=0.0, disfacshr=0.0, distype="CD")
+                    dict(
+                        permno=int(permnos[j]),
+                        disexdt=ex,
+                        dispaydt=pay,
+                        disrecorddt=rec,
+                        disdeclaredt=ex - timedelta(days=int(rca.integers(20, 45))),
+                        disdivamt=amt,
+                        disfacpr=0.0,
+                        disfacshr=0.0,
+                        distype="CD",
+                    )
                 )
     # integer splits
     split_names = rca.choice(np.where(member0)[0], 12, replace=False)
-    for j in split_names:
+    for j in (int(x) for x in split_names):
         ex = sessions[int(rca.integers(60, D - 40))]
         f = float(rca.choice([2, 3, 4, 10, 20], p=[0.45, 0.2, 0.2, 0.1, 0.05]))
         i = cal.index(ex)
@@ -185,19 +193,29 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
             i += 1
         split_fac[i, j] = f
         dist_rows.append(
-            dict(permno=int(permnos[j]), disexdt=ex, dispaydt=ex, disrecorddt=ex,
-                 disdeclaredt=ex - timedelta(days=30), disdivamt=0.0, disfacpr=f - 1, disfacshr=f - 1,
-                 distype="FS")
+            dict(
+                permno=int(permnos[j]),
+                disexdt=ex,
+                dispaydt=ex,
+                disrecorddt=ex,
+                disdeclaredt=ex - timedelta(days=30),
+                disdivamt=0.0,
+                disfacpr=f - 1,
+                disfacshr=f - 1,
+                distype="FS",
+            )
         )
 
     # ------------------------------------------------------------------ membership schedule
-    eff_dates = quarterly_effective_dates(cal, date(2022, 3, 1), end)
+    eff_dates = quarterly_effective_dates(cal, start, end)
     member = np.zeros((D, N), bool)
     member[:, :] = member0[None, :]
-    start_dt = {j: sessions[0] - timedelta(days=int(rng.integers(400, 9000))) for j in np.where(member0)[0]}
+    start_dt: dict[int, date] = {
+        int(j): sessions[0] - timedelta(days=int(rng.integers(400, 9000))) for j in np.where(member0)[0]
+    }
     orig_start = dict(start_dt)
     end_dt: dict[int, date] = {}
-    available_pool = list(pool_idx)
+    available_pool: list[int] = [int(x) for x in pool_idx]
     rng.shuffle(available_pool)
     delist_rows: list[dict[str, object]] = []
     alive_until = np.full(N, D - 1)
@@ -221,7 +239,7 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
         smallest = current[np.argsort(caps_now)[:40]]
         dels = rng.choice(smallest, min(k, len(smallest)), replace=False)
         adds = [available_pool.pop() for _ in range(min(k, len(available_pool)))]
-        for j in dels:
+        for j in (int(x) for x in dels):
             do_delete(int(j), eff)
             available_pool.insert(0, int(j))
         for j in adds:
@@ -232,7 +250,7 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
             members_after = np.where(member[min(ei + 1, D - 1)])[0]
             caps_after = cap0[members_after] * np.exp(np.cumsum(rtot[: ei + 1, members_after], axis=0)[-1])
             members_after = members_after[np.argsort(-caps_after)[30:]]  # never the mega caps
-            for _ in range(int(rng.integers(1, 4))):
+            for _ in range(int(rng.integers(4, 10))):
                 j = int(rng.choice(members_after))
                 exi = int(rng.integers(ei + 8, max(ei + 9, nxt - 2)))
                 kind = str(rng.choice(["SPINOFF", "RIGHTS", "MERGER"], p=[0.45, 0.2, 0.35]))
@@ -247,9 +265,17 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
             # value per share in that day's prices (approximation; adjusted below with level)
             nontrade_value[i, j] = -frac  # placeholder fraction, resolved in price loop
             dist_rows.append(
-                dict(permno=int(permnos[j]), disexdt=ex, dispaydt=ex + timedelta(days=10), disrecorddt=ex,
-                     disdeclaredt=declared, disdivamt=float("nan"), disfacpr=0.0, disfacshr=0.0,
-                     distype="SO" if kind == "SPINOFF" else "RI")
+                dict(
+                    permno=int(permnos[j]),
+                    disexdt=ex,
+                    dispaydt=ex + timedelta(days=10),
+                    disrecorddt=ex,
+                    disdeclaredt=declared,
+                    disdivamt=float("nan"),
+                    disfacpr=0.0,
+                    disfacshr=0.0,
+                    distype="SO" if kind == "SPINOFF" else "RI",
+                )
             )
         elif j not in merged and alive_until[j] == D - 1 and member[i, j]:
             merged.add(j)
@@ -260,12 +286,25 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
                 if available_pool:
                     do_add(available_pool.pop(), ex)
             dist_rows.append(
-                dict(permno=int(permnos[j]), disexdt=ex, dispaydt=ex, disrecorddt=last, disdeclaredt=declared,
-                     disdivamt=0.0, disfacpr=-1.0, disfacshr=-1.0, distype="MG")
+                dict(
+                    permno=int(permnos[j]),
+                    disexdt=ex,
+                    dispaydt=ex,
+                    disrecorddt=last,
+                    disdeclaredt=declared,
+                    disdivamt=0.0,
+                    disfacpr=-1.0,
+                    disfacshr=-1.0,
+                    distype="MG",
+                )
             )
             delist_rows.append(
-                dict(permno=int(permnos[j]), delistingdt=ex, delret=float(rca.uniform(0.0, 0.03)),
-                     delactiontype="MER")
+                dict(
+                    permno=int(permnos[j]),
+                    delistingdt=ex,
+                    delret=float(rca.uniform(0.0, 0.03)),
+                    delactiontype="MER",
+                )
             )
 
     # ------------------------------------------------------------------ prices
@@ -288,7 +327,7 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
         div = div_cash[i] / 1.0
         ntv_frac = np.where(nontrade_value[i] < 0, -nontrade_value[i], 0.0)
         ntv = ntv_frac * p_prev_adj
-        for j in np.where(ntv > 0)[0]:
+        for j in (int(x) for x in np.where(ntv > 0)[0]):
             distamt_fill[(i, int(j))] = round(float(ntv[j]), 4)
         p_new = p_prev_adj * (1 + r) - div - ntv
         p_new = np.maximum(p_new, 1.0)
@@ -301,7 +340,7 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
         shr[i] = np.round(s, 0)
     for row in dist_rows:
         if row["distype"] in ("SO", "RI"):
-            j = int(np.searchsorted(permnos, row["permno"]))
+            j = int(np.searchsorted(permnos, int(row["permno"])))  # type: ignore[call-overload]
             i = cal.index(row["disexdt"])  # type: ignore[arg-type]
             row["disdivamt"] = distamt_fill.get((i, j), 0.0)
 
@@ -324,7 +363,9 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
     prev_close = np.vstack([prc[:1], prc[:-1]]) / split_fac
     opens = np.round(np.maximum(prev_close * (1 + gap + 0.4 * rtot), 1.0), 2)
     cap_now = prc * shr * 1e3
-    spread_bps = (0.8 + 12.0 * (cap_now / 1e9) ** -0.3) * np.exp(component_rng(seed, "spread").normal(0, 0.15, (D, N)))
+    spread_bps = (0.8 + 12.0 * (cap_now / 1e9) ** -0.3) * np.exp(
+        component_rng(seed, "spread").normal(0, 0.15, (D, N))
+    )
     half = prc * spread_bps / 2e4
     bid = np.round(prc - half, 2)
     ask = np.round(prc + half, 2)
@@ -361,16 +402,49 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
         if j == ticker_change:
             mid = date(2024, 9, 16)
             new8 = cusip8[j][:6] + "99"
-            sec_rows.append(dict(permno=int(permnos[j]), secinfostartdt=date(1990, 1, 1), secinfoenddt=mid - timedelta(days=1),
-                                 ticker=tickers[j], cusip=cusip8[j], cusip9=c9, primaryexch=primary[j],
-                                 securitytype="EQTY", sharetype="NS", issuernm=iss))
-            sec_rows.append(dict(permno=int(permnos[j]), secinfostartdt=mid, secinfoenddt=date(9999, 12, 31),
-                                 ticker=tickers[j] + "X", cusip=new8, cusip9=new8 + _cusip_check(new8),
-                                 primaryexch=primary[j], securitytype="EQTY", sharetype="NS", issuernm=iss))
+            sec_rows.append(
+                dict(
+                    permno=int(permnos[j]),
+                    secinfostartdt=date(1990, 1, 1),
+                    secinfoenddt=mid - timedelta(days=1),
+                    ticker=tickers[j],
+                    cusip=cusip8[j],
+                    cusip9=c9,
+                    primaryexch=primary[j],
+                    securitytype="EQTY",
+                    sharetype="NS",
+                    issuernm=iss,
+                )
+            )
+            sec_rows.append(
+                dict(
+                    permno=int(permnos[j]),
+                    secinfostartdt=mid,
+                    secinfoenddt=date(9999, 12, 31),
+                    ticker=tickers[j] + "X",
+                    cusip=new8,
+                    cusip9=new8 + _cusip_check(new8),
+                    primaryexch=primary[j],
+                    securitytype="EQTY",
+                    sharetype="NS",
+                    issuernm=iss,
+                )
+            )
         else:
-            sec_rows.append(dict(permno=int(permnos[j]), secinfostartdt=date(1990, 1, 1), secinfoenddt=date(9999, 12, 31),
-                                 ticker=tickers[j], cusip=cusip8[j], cusip9=c9, primaryexch=primary[j],
-                                 securitytype="EQTY", sharetype="NS" if j != sc_b else "A", issuernm=iss))
+            sec_rows.append(
+                dict(
+                    permno=int(permnos[j]),
+                    secinfostartdt=date(1990, 1, 1),
+                    secinfoenddt=date(9999, 12, 31),
+                    ticker=tickers[j],
+                    cusip=cusip8[j],
+                    cusip9=c9,
+                    primaryexch=primary[j],
+                    securitytype="EQTY",
+                    sharetype="NS" if j != sc_b else "A",
+                    issuernm=iss,
+                )
+            )
     secinfo = pl.DataFrame(sec_rows).with_columns(pl.col("secinfostartdt", "secinfoenddt").cast(pl.Date))
 
     # exact membership intervals from the daily member matrix
@@ -388,13 +462,31 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
     mbr = pl.DataFrame(intervals).with_columns(pl.col("mbrstartdt", "mbrenddt").cast(pl.Date))
 
     last_alive = {int(permnos[j]): sessions[int(alive_until[j])] for j in range(N)}
-    dist_rows = [r for r in dist_rows if r["disexdt"] <= last_alive[int(r["permno"])] or r["distype"] == "MG"]  # type: ignore[operator]
-    dist = pl.DataFrame(dist_rows).with_columns(
-        pl.col("disexdt", "dispaydt", "disrecorddt", "disdeclaredt").cast(pl.Date)
-    ).sort("permno", "disexdt")
+    dist_rows = [r for r in dist_rows if r["disexdt"] <= last_alive[int(r["permno"])] or r["distype"] == "MG"]  # type: ignore[operator,call-overload]
+    dist = (
+        pl.DataFrame(dist_rows)
+        .with_columns(pl.col("disexdt", "dispaydt", "disrecorddt", "disdeclaredt").cast(pl.Date))
+        .sort("permno", "disexdt")
+    )
     delists = (
-        pl.DataFrame(delist_rows, schema={"permno": pl.Int64, "delistingdt": pl.Date, "delret": pl.Float64, "delactiontype": pl.Utf8})
-        if delist_rows else pl.DataFrame(schema={"permno": pl.Int64, "delistingdt": pl.Date, "delret": pl.Float64, "delactiontype": pl.Utf8})
+        pl.DataFrame(
+            delist_rows,
+            schema={
+                "permno": pl.Int64,
+                "delistingdt": pl.Date,
+                "delret": pl.Float64,
+                "delactiontype": pl.Utf8,
+            },
+        )
+        if delist_rows
+        else pl.DataFrame(
+            schema={
+                "permno": pl.Int64,
+                "delistingdt": pl.Date,
+                "delret": pl.Float64,
+                "delactiontype": pl.Utf8,
+            }
+        )
     )
 
     # benchmark: cap-weighted over members using prior-day caps (CRSP convention)
@@ -406,11 +498,22 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
     rb = component_rng(seed, "benchmark")
     sprtrn = vwretx + rb.normal(0, 0.8e-4, D)
     spindx = 4500 * np.cumprod(1 + sprtrn)
-    dsp500 = pl.DataFrame({"caldt": pl.Series(sessions, dtype=pl.Date), "vwretd": vwretd, "vwretx": vwretx,
-                           "sprtrn": sprtrn, "spindx": spindx})
-    sp_tr = pl.DataFrame({"caldt": pl.Series(sessions, dtype=pl.Date),
-                          "tr_return": vwretd + rb.normal(-0.15e-4 / 252, 1.2e-4, D),
-                          "source": ["SYNTHETIC_SP500_TR"] * D})
+    dsp500 = pl.DataFrame(
+        {
+            "caldt": pl.Series(sessions, dtype=pl.Date),
+            "vwretd": vwretd,
+            "vwretx": vwretx,
+            "sprtrn": sprtrn,
+            "spindx": spindx,
+        }
+    )
+    sp_tr = pl.DataFrame(
+        {
+            "caldt": pl.Series(sessions, dtype=pl.Date),
+            "tr_return": vwretd + rb.normal(-0.15e-4 / 252, 1.2e-4, D),
+            "source": ["SYNTHETIC_SP500_TR"] * D,
+        }
+    )
 
     # ------------------------------------------------------------------ BMLL reference
     instrument_id = (permnos * 3 + 500000).astype(np.int64)
@@ -427,7 +530,9 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
         tick_b = tickers[j].replace(".", " ")  # BMLL uses a space for share-class tickers
         if j == unmappable:
             tick_b = tickers[j] + "Q"
-        venues = [primary[j]] + [v for v in ["ARCX", "BATS", "EDGX", "IEXG", "MEMX", "XNAS"] if v != primary[j]][:3]
+        venues = [primary[j]] + [
+            v for v in ["ARCX", "BATS", "EDGX", "IEXG", "MEMX", "XNAS"] if v != primary[j]
+        ][:3]
         for k, mic in enumerate(venues + ["@SIP"]):
             lid += 1
             if k == 0:
@@ -436,10 +541,23 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
                 sip_lid[j] = lid
             vf, vt = date(2015, 1, 1), date(9999, 12, 31)
             isin_out = "" if (j in isin_missing or j == unmappable) else isin
-            ref_rows.append(dict(ListingId=lid, InstrumentId=int(instrument_id[j]), ISIN=isin_out, FIGI=figi,
-                                 FIGIComposite=figi[:-1] + "C", Ticker=tick_b, MIC=mic, OPOL=primary[j],
-                                 IsPrimary=(k == 0), IsAlive=bool(alive_until[j] == D - 1),
-                                 MarketDataLevel="L3" if mic != "@SIP" else "TRADES", ValidFrom=vf, ValidTo=vt))
+            ref_rows.append(
+                dict(
+                    ListingId=lid,
+                    InstrumentId=int(instrument_id[j]),
+                    ISIN=isin_out,
+                    FIGI=figi,
+                    FIGIComposite=figi[:-1] + "C",
+                    Ticker=tick_b,
+                    MIC=mic,
+                    OPOL=primary[j],
+                    IsPrimary=(k == 0),
+                    IsAlive=bool(alive_until[j] == D - 1),
+                    MarketDataLevel="L3" if mic != "@SIP" else "TRADES",
+                    ValidFrom=vf,
+                    ValidTo=vt,
+                )
+            )
         if j == ticker_change:
             # BMLL also records the new ISIN after the CUSIP change on the same listing
             new8 = cusip8[j][:6] + "99"
@@ -453,8 +571,12 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
     reference = pl.DataFrame(ref_rows).with_columns(pl.col("ValidFrom", "ValidTo").cast(pl.Date))
 
     # ------------------------------------------------------------------ BMLL daily analytics
-    sig_d = (np.sqrt(beta**2 * 0.145**2 + 0.07**2 + (idio_vol * np.sqrt(252)) ** 2) / np.sqrt(252) * 0.85)
-    auc_share = np.where(np.isin(np.arange(D), list(eff_idx)), 0.27, np.where(np.isin(np.arange(D), list(third_fri)), 0.12, 0.075))
+    sig_d = np.sqrt(beta**2 * 0.145**2 + 0.07**2 + (idio_vol * np.sqrt(252)) ** 2) / np.sqrt(252) * 0.85
+    auc_share = np.where(
+        np.isin(np.arange(D), list(eff_idx)),
+        0.27,
+        np.where(np.isin(np.arange(D), list(third_fri)), 0.12, 0.075),
+    )
     rauc = component_rng(seed, "auction")
     auc_vol = np.round(vol * auc_share[:, None] * np.exp(rauc.normal(0, 0.25, (D, N))), 0)
     open_vol = np.round(vol * 0.012 * np.exp(rauc.normal(0, 0.3, (D, N))), 0)
@@ -473,7 +595,9 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
     for i in range(D):
         # paths depend only on stored columns (open, close, dislocation, intraday vol) + seed,
         # so the execution layer can rebuild them from the lake.
-        paths = intraday_paths(seed, sessions[i], np.maximum(opens[i], 1.0), np.maximum(last_cont[i], 1.0), vol_intraday[i])
+        paths = intraday_paths(
+            seed, sessions[i], np.maximum(opens[i], 1.0), np.maximum(last_cont[i], 1.0), vol_intraday[i]
+        )
         vwap[i] = paths @ VOLUME_CURVE
         twap[i] = paths.mean(1)
     sweep100 = spread_bps * (1.2 + 3e9 / np.maximum(cap_now, 1e9) * 0.8)
@@ -526,16 +650,47 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
     p_mid = prc[di, ji]
     for k, v in enumerate(venues_all):
         vv = cont_vol[di, ji] * base_mix[ji, k]
-        parts.append(pl.DataFrame({"ListingId": primary_lid[ji], "Date": dates_col,
-                                   "ClassificationName": "LIT_CONTINUOUS" if v != "DARK" else "DARK",
-                                   "ExecutionVenue": v, "TradeVolume": np.round(vv, 0), "TradeNotionalUSD": vv * p_mid}))
+        parts.append(
+            pl.DataFrame(
+                {
+                    "ListingId": primary_lid[ji],
+                    "Date": dates_col,
+                    "ClassificationName": "LIT_CONTINUOUS" if v != "DARK" else "DARK",
+                    "ExecutionVenue": v,
+                    "TradeVolume": np.round(vv, 0),
+                    "TradeNotionalUSD": vv * p_mid,
+                }
+            )
+        )
     missing_aucvol = rv.random(len(di)) < 0.0005
     av = np.where(missing_aucvol, np.nan, auc_vol[di, ji])
-    parts.append(pl.DataFrame({"ListingId": primary_lid[ji], "Date": dates_col, "ClassificationName": "LIT_CLOSING_AUCTION",
-                               "ExecutionVenue": primary[ji], "TradeVolume": av, "TradeNotionalUSD": av * p_mid}))
-    parts.append(pl.DataFrame({"ListingId": primary_lid[ji], "Date": dates_col, "ClassificationName": "LIT_OPENING_AUCTION",
-                               "ExecutionVenue": primary[ji], "TradeVolume": open_vol[di, ji], "TradeNotionalUSD": open_vol[di, ji] * opens[di, ji]}))
-    ct = pl.concat(parts).filter(pl.col("TradeVolume").is_not_nan() | (pl.col("ClassificationName") != "LIT_CLOSING_AUCTION"))
+    parts.append(
+        pl.DataFrame(
+            {
+                "ListingId": primary_lid[ji],
+                "Date": dates_col,
+                "ClassificationName": "LIT_CLOSING_AUCTION",
+                "ExecutionVenue": primary[ji],
+                "TradeVolume": av,
+                "TradeNotionalUSD": av * p_mid,
+            }
+        )
+    )
+    parts.append(
+        pl.DataFrame(
+            {
+                "ListingId": primary_lid[ji],
+                "Date": dates_col,
+                "ClassificationName": "LIT_OPENING_AUCTION",
+                "ExecutionVenue": primary[ji],
+                "TradeVolume": open_vol[di, ji],
+                "TradeNotionalUSD": open_vol[di, ji] * opens[di, ji],
+            }
+        )
+    )
+    ct = pl.concat(parts).filter(
+        pl.col("TradeVolume").is_not_nan() | (pl.col("ClassificationName") != "LIT_CLOSING_AUCTION")
+    )
     ct = ct.with_columns(pl.col("TradeVolume").fill_nan(None)).drop_nulls("TradeVolume")
 
     tables = {

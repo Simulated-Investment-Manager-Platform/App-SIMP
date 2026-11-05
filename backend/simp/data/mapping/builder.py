@@ -40,8 +40,10 @@ def build_security_map(
 ) -> MappingResult:
     ref = reference.with_columns(pl.col("ISIN").replace("", None))
     prim = ref.filter(pl.col("IsPrimary") & (pl.col("MIC") == pl.col("OPOL")))
-    sip = ref.filter(pl.col("MIC") == "@SIP").select("InstrumentId", "ListingId", "ValidFrom", "ValidTo").rename(
-        {"ListingId": "SipListingId", "ValidFrom": "SipFrom", "ValidTo": "SipTo"}
+    sip = (
+        ref.filter(pl.col("MIC") == "@SIP")
+        .select("InstrumentId", "ListingId", "ValidFrom", "ValidTo")
+        .rename({"ListingId": "SipListingId", "ValidFrom": "SipFrom", "ValidTo": "SipTo"})
     )
     by_isin: dict[str, list[dict[str, object]]] = {}
     for r in prim.filter(pl.col("ISIN").is_not_null()).iter_rows(named=True):
@@ -90,26 +92,71 @@ def build_security_map(
             ov = _overlap(s0, s1, r["ValidFrom"], r["ValidTo"])  # type: ignore[arg-type]
             if ov is None:
                 continue
-            sips = [x for x in sip_by_inst.get(int(r["InstrumentId"]), [])  # type: ignore[call-overload]
-                    if _overlap(ov[0], ov[1], x["SipFrom"], x["SipTo"])]  # type: ignore[arg-type]
+            sips = [
+                x
+                for x in sip_by_inst.get(int(r["InstrumentId"]), [])  # type: ignore[call-overload]
+                if _overlap(ov[0], ov[1], x["SipFrom"], x["SipTo"])  # type: ignore[arg-type]
+            ]
             rows.append(
-                dict(permno=permno, listing_id=int(r["ListingId"]), instrument_id=int(r["InstrumentId"]),  # type: ignore[call-overload]
-                     sip_listing_id=int(sips[0]["SipListingId"]) if sips else None,  # type: ignore[call-overload]
-                     isin=str(r["ISIN"] or isin), figi=r["FIGI"], ticker=s["ticker"], opol=r["OPOL"],
-                     valid_from=ov[0], valid_to=ov[1], method=method, confidence=conf)
+                dict(
+                    permno=permno,
+                    listing_id=int(r["ListingId"]),  # type: ignore[call-overload]
+                    instrument_id=int(r["InstrumentId"]),  # type: ignore[call-overload]
+                    sip_listing_id=int(sips[0]["SipListingId"]) if sips else None,  # type: ignore[call-overload]
+                    isin=str(r["ISIN"] or isin),
+                    figi=r["FIGI"],
+                    ticker=s["ticker"],
+                    opol=r["OPOL"],
+                    valid_from=ov[0],
+                    valid_to=ov[1],
+                    method=method,
+                    confidence=conf,
+                )
             )
             placed = True
         if not placed:
-            queue.append(dict(permno=permno, ticker=s["ticker"], isin=isin, valid_from=s0, valid_to=s1,
-                              reason="no ISIN match; ticker fallback failed or price check disagreed"))
-    smap = pl.DataFrame(
-        rows,
-        schema={"permno": pl.Int64, "listing_id": pl.Int64, "instrument_id": pl.Int64, "sip_listing_id": pl.Int64,
-                "isin": pl.Utf8, "figi": pl.Utf8, "ticker": pl.Utf8, "opol": pl.Utf8, "valid_from": pl.Date,
-                "valid_to": pl.Date, "method": pl.Utf8, "confidence": pl.Float64},
-    ).unique(["permno", "valid_from"], keep="first").sort("permno", "valid_from")
-    q = pl.DataFrame(queue, schema={"permno": pl.Int64, "ticker": pl.Utf8, "isin": pl.Utf8, "valid_from": pl.Date,
-                                    "valid_to": pl.Date, "reason": pl.Utf8})
+            queue.append(
+                dict(
+                    permno=permno,
+                    ticker=s["ticker"],
+                    isin=isin,
+                    valid_from=s0,
+                    valid_to=s1,
+                    reason="no ISIN match; ticker fallback failed or price check disagreed",
+                )
+            )
+    smap = (
+        pl.DataFrame(
+            rows,
+            schema={
+                "permno": pl.Int64,
+                "listing_id": pl.Int64,
+                "instrument_id": pl.Int64,
+                "sip_listing_id": pl.Int64,
+                "isin": pl.Utf8,
+                "figi": pl.Utf8,
+                "ticker": pl.Utf8,
+                "opol": pl.Utf8,
+                "valid_from": pl.Date,
+                "valid_to": pl.Date,
+                "method": pl.Utf8,
+                "confidence": pl.Float64,
+            },
+        )
+        .unique(["permno", "valid_from"], keep="first")
+        .sort("permno", "valid_from")
+    )
+    q = pl.DataFrame(
+        queue,
+        schema={
+            "permno": pl.Int64,
+            "ticker": pl.Utf8,
+            "isin": pl.Utf8,
+            "valid_from": pl.Date,
+            "valid_to": pl.Date,
+            "reason": pl.Utf8,
+        },
+    )
     return MappingResult(smap, q)
 
 
@@ -117,9 +164,13 @@ def validate_mapping(smap: pl.DataFrame, needs: pl.DataFrame) -> pl.DataFrame:
     """``needs`` has (permno, date). Returns rows that do not have exactly one mapping.
 
     Mirrors the handoff notebook's ``validate_bmll_mapping`` rule."""
-    joined = needs.join(smap.select("permno", "listing_id", "valid_from", "valid_to"), on="permno", how="left")
+    joined = needs.join(
+        smap.select("permno", "listing_id", "valid_from", "valid_to"), on="permno", how="left"
+    )
     hit = joined.with_columns(
-        ((pl.col("date") >= pl.col("valid_from")) & (pl.col("date") <= pl.col("valid_to"))).fill_null(False).alias("hit")
+        ((pl.col("date") >= pl.col("valid_from")) & (pl.col("date") <= pl.col("valid_to")))
+        .fill_null(False)
+        .alias("hit")
     )
     counts = hit.group_by("permno", "date").agg(pl.col("hit").sum().alias("n"))
     return counts.filter(pl.col("n") != 1).sort("permno", "date")
@@ -128,4 +179,6 @@ def validate_mapping(smap: pl.DataFrame, needs: pl.DataFrame) -> pl.DataFrame:
 def require_unique(smap: pl.DataFrame, needs: pl.DataFrame) -> None:
     bad = validate_mapping(smap, needs)
     if bad.height:
-        raise MappingError(f"{bad.height} (permno, date) pairs without exactly one BMLL mapping, e.g. {bad.head(3).to_dicts()}")
+        raise MappingError(
+            f"{bad.height} (permno, date) pairs without exactly one BMLL mapping, e.g. {bad.head(3).to_dicts()}"
+        )

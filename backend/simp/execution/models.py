@@ -55,14 +55,26 @@ def _fee(venue: str, liquidity: str, qty: float) -> float:
     v = VENUE_REF.get(venue)
     if v is None:
         return 0.0
-    per = {Liquidity.REMOVE: v.fee_remove, Liquidity.ADD: v.fee_add, Liquidity.AUCTION: v.fee_auction,
-           Liquidity.MIDPOINT: v.fee_midpoint}.get(Liquidity(liquidity), 0.0)
+    per = {
+        Liquidity.REMOVE: v.fee_remove,
+        Liquidity.ADD: v.fee_add,
+        Liquidity.AUCTION: v.fee_auction,
+        Liquidity.MIDPOINT: v.fee_midpoint,
+    }.get(Liquidity(liquidity), 0.0)
     return round(per * qty, 4)
 
 
 class Executor:
-    def __init__(self, md: MarketData, intraday: IntradayService, model: ExecutionModel, cost: CostModelParams,
-                 ids: IdFactory, run_id: str, seed: int) -> None:
+    def __init__(
+        self,
+        md: MarketData,
+        intraday: IntradayService,
+        model: ExecutionModel,
+        cost: CostModelParams,
+        ids: IdFactory,
+        run_id: str,
+        seed: int,
+    ) -> None:
         self.md, self.intra, self.model, self.cost, self.ids = md, intraday, model, cost, ids
         self.run_id, self.seed = run_id, seed
         if model == ExecutionModel.T3:
@@ -91,21 +103,69 @@ class Executor:
         a = float(self.md.adv20[i, j])
         return a if math.isfinite(a) and a > 0 else float(np.nan_to_num(self.md.volume[i, j], nan=1e6))
 
-    def _child(self, to: TraderOrder, venue: str, otype: str, qty: float, sent_minute: float, tif: str, limit: float | None) -> ChildOrder:
+    def _child(
+        self,
+        to: TraderOrder,
+        venue: str,
+        otype: str,
+        qty: float,
+        sent_minute: float,
+        tif: str,
+        limit: float | None,
+    ) -> ChildOrder:
         sent = max(ts_at(self.md.sessions[self._i], sent_minute), to.start_ts)
-        return ChildOrder(self.ids.new(sent), to.trader_order_id, self.run_id, to.broker_id, venue, otype, qty, limit,
-                          sent, tif, str(ChildStatus.NEW))
+        return ChildOrder(
+            self.ids.new(sent),
+            to.trader_order_id,
+            self.run_id,
+            to.broker_id,
+            venue,
+            otype,
+            qty,
+            limit,
+            sent,
+            tif,
+            str(ChildStatus.NEW),
+        )
 
-    def _fill(self, to: TraderOrder, ch: ChildOrder, minute: float, price: float, qty: float, liq: str, state: str,
-              model: str, ref: dict[str, object], commission_bps: float | None = None) -> Fill:
+    def _fill(
+        self,
+        to: TraderOrder,
+        ch: ChildOrder,
+        minute: float,
+        price: float,
+        qty: float,
+        liq: str,
+        state: str,
+        model: str,
+        ref: dict[str, object],
+        commission_bps: float | None = None,
+    ) -> Fill:
         ts = ts_at(self.md.sessions[self._i], minute)
         ts = max(ts, ch.sent_ts)
         ts = min(ts, to.end_ts)
         px = _round_px(price, liq)
         cb = to.commission_bps if commission_bps is None else commission_bps
-        return Fill(self.ids.new(ts), ch.child_order_id, to.trader_order_id, to.pm_order_id, self.run_id, to.broker_id,
-                    ch.venue_mic, ts, px, qty, liq, state, _fee(ch.venue_mic, liq, qty) if model != "T0_CLOSE" else 0.0,
-                    round(cb * px * qty / 1e4, 4), model, ref, to.permno, to.side)
+        return Fill(
+            self.ids.new(ts),
+            ch.child_order_id,
+            to.trader_order_id,
+            to.pm_order_id,
+            self.run_id,
+            to.broker_id,
+            ch.venue_mic,
+            ts,
+            px,
+            qty,
+            liq,
+            state,
+            _fee(ch.venue_mic, liq, qty) if model != "T0_CLOSE" else 0.0,
+            round(cb * px * qty / 1e4, 4),
+            model,
+            ref,
+            to.permno,
+            to.side,
+        )
 
     # ------------------------------------------------------------------ main
     def execute(self, i: int, orders: list[TraderOrder]) -> DayResult:
@@ -138,13 +198,27 @@ class Executor:
                 c, f = self._t1_continuous(o, i, j, rng)
             filled = sum(x.quantity for x in f)
             o.filled_qty = filled
-            o.status = str(TraderStatus.FILLED if filled >= o.quantity - 1e-9 else TraderStatus.EXPIRED if filled == 0 else TraderStatus.PARTIAL)
+            o.status = str(
+                TraderStatus.FILLED
+                if filled >= o.quantity - 1e-9
+                else TraderStatus.EXPIRED
+                if filled == 0
+                else TraderStatus.PARTIAL
+            )
             if o.status == TraderStatus.PARTIAL:
-                o.status = str(TraderStatus.EXPIRED)  # window closed with quantity left: explicit, never silent
+                o.status = str(
+                    TraderStatus.EXPIRED
+                )  # window closed with quantity left: explicit, never silent
                 o.params = {**o.params, "unfilled": o.quantity - filled}
             for ch in c:
                 q = sum(x.quantity for x in f if x.child_order_id == ch.child_order_id)
-                ch.status = str(ChildStatus.FILLED if q >= ch.quantity - 1e-9 else ChildStatus.CANCELLED if q == 0 else ChildStatus.PARTIAL)
+                ch.status = str(
+                    ChildStatus.FILLED
+                    if q >= ch.quantity - 1e-9
+                    else ChildStatus.CANCELLED
+                    if q == 0
+                    else ChildStatus.PARTIAL
+                )
             children += c
             fills += f
         return DayResult(children, fills)
@@ -152,34 +226,82 @@ class Executor:
     # ------------------------------------------------------------------ T0
     def _t0(self, o: TraderOrder, i: int, j: int) -> tuple[list[ChildOrder], list[Fill]]:
         venue = self.md.primary[j]
-        ch = self._child(o, venue, str(OrderType.MOC), o.quantity, minutes_from_open(time(15, 45)), str(Tif.AT_CLOSE), None)
+        ch = self._child(
+            o, venue, str(OrderType.MOC), o.quantity, minutes_from_open(time(15, 45)), str(Tif.AT_CLOSE), None
+        )
         px = float(self.md.prc[i, j])
-        f = self._fill(o, ch, 390, px, o.quantity, str(Liquidity.AUCTION), str(MarketState.CLOSING_AUCTION), "T0_CLOSE",
-                       {"close": px, "mid": px}, commission_bps=0.0)
+        f = self._fill(
+            o,
+            ch,
+            390,
+            px,
+            o.quantity,
+            str(Liquidity.AUCTION),
+            str(MarketState.CLOSING_AUCTION),
+            "T0_CLOSE",
+            {"close": px, "mid": px},
+            commission_bps=0.0,
+        )
         f.fees_usd = 0.0
         return [ch], [f]
 
     def _cross(self, o: TraderOrder, i: int, j: int) -> tuple[list[ChildOrder], list[Fill]]:
-        ch = self._child(o, "INTERNAL", str(OrderType.CROSS), o.quantity, minutes_from_open(time(15, 50)), str(Tif.AT_CLOSE), None)
+        ch = self._child(
+            o,
+            "INTERNAL",
+            str(OrderType.CROSS),
+            o.quantity,
+            minutes_from_open(time(15, 50)),
+            str(Tif.AT_CLOSE),
+            None,
+        )
         px = float(self.md.prc[i, j])
-        f = self._fill(o, ch, 390, px, o.quantity, str(Liquidity.CROSS), str(MarketState.CLOSING_AUCTION), "NETTING_CROSS",
-                       {"close": px, "mid": px}, commission_bps=0.0)
+        f = self._fill(
+            o,
+            ch,
+            390,
+            px,
+            o.quantity,
+            str(Liquidity.CROSS),
+            str(MarketState.CLOSING_AUCTION),
+            "NETTING_CROSS",
+            {"close": px, "mid": px},
+            commission_bps=0.0,
+        )
         return [ch], [f]
 
     def _portfolio(self, o: TraderOrder, i: int, j: int) -> tuple[list[ChildOrder], list[Fill]]:
         venue = self.md.primary[j]
-        ch = self._child(o, venue, str(OrderType.MOC), o.quantity, minutes_from_open(time(15, 45)), str(Tif.AT_CLOSE), None)
+        ch = self._child(
+            o, venue, str(OrderType.MOC), o.quantity, minutes_from_open(time(15, 45)), str(Tif.AT_CLOSE), None
+        )
         px = float(self.md.prc[i, j])
-        f = self._fill(o, ch, 390, px, o.quantity, str(Liquidity.AUCTION), str(MarketState.CLOSING_AUCTION),
-                       f"{self.model}_PT_CLOSE_GUARANTEE", {"close": px, "mid": px})
+        f = self._fill(
+            o,
+            ch,
+            390,
+            px,
+            o.quantity,
+            str(Liquidity.AUCTION),
+            str(MarketState.CLOSING_AUCTION),
+            f"{self.model}_PT_CLOSE_GUARANTEE",
+            {"close": px, "mid": px},
+        )
         f.fees_usd = 0.0
         return [ch], [f]
 
     def _auction(self, o: TraderOrder, i: int, j: int, q_agg: float) -> tuple[list[ChildOrder], list[Fill]]:
         md = self.md
         venue = md.primary[j]
-        ch = self._child(o, venue, str(OrderType.MOC if o.strategy == Strategy.MOC else OrderType.LOC), o.quantity,
-                         minutes_from_open(time(15, 45)), str(Tif.AT_CLOSE), o.params.get("limit"))
+        ch = self._child(
+            o,
+            venue,
+            str(OrderType.MOC if o.strategy == Strategy.MOC else OrderType.LOC),
+            o.quantity,
+            minutes_from_open(time(15, 45)),
+            str(Tif.AT_CLOSE),
+            o.params.get("limit"),
+        )
         flags = []
         p_auc = float(md.auc_price[i, j])
         if md.auc_price_fb[i, j] or not math.isfinite(p_auc):
@@ -192,21 +314,41 @@ class Executor:
         same = (md.imbalance[i, j] > 0 and s > 0) or (md.imbalance[i, j] < 0 and s < 0)
         dp = auction_impact_bps(q_agg, v_auc, self._sigma(i, j), bool(same), self.cost)
         px = p_auc * (1 + s * dp / 1e4)
-        ref: dict[str, object] = {"auction_price": p_auc, "auction_volume": v_auc, "imbalance": float(md.imbalance[i, j]),
-                                  "reference_price": round(float(md.prc[i, j] / (1 + md.dislocation_bps[i, j] / 1e4)), 4),
-                                  "impact_bps": round(dp, 4), "q_over_auction": q_agg / v_auc if v_auc > 0 else None,
-                                  "mid": p_auc, "flags": flags}
-        f = self._fill(o, ch, 390, px, o.quantity, str(Liquidity.AUCTION), str(MarketState.CLOSING_AUCTION),
-                       f"{self.model}_AUCTION", ref)
+        ref: dict[str, object] = {
+            "auction_price": p_auc,
+            "auction_volume": v_auc,
+            "imbalance": float(md.imbalance[i, j]),
+            "reference_price": round(float(md.prc[i, j] / (1 + md.dislocation_bps[i, j] / 1e4)), 4),
+            "impact_bps": round(dp, 4),
+            "q_over_auction": q_agg / v_auc if v_auc > 0 else None,
+            "mid": p_auc,
+            "flags": flags,
+        }
+        f = self._fill(
+            o,
+            ch,
+            390,
+            px,
+            o.quantity,
+            str(Liquidity.AUCTION),
+            str(MarketState.CLOSING_AUCTION),
+            f"{self.model}_AUCTION",
+            ref,
+        )
         return [ch], [f]
 
     # ------------------------------------------------------------------ continuous (T1)
-    def _slices(self, o: TraderOrder, i: int, j: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    def _slices(
+        self, o: TraderOrder, i: int, j: int, rng: np.random.Generator
+    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
         notional = o.quantity * float(self.md.prc[i, j])
         n = int(np.clip(round(3 + 4 * math.log10(1 + notional / 50_000)), 3, 30))
         n = int(min(n, max(1, o.quantity)))
         front = 2.5 if o.strategy == Strategy.ALGO_IS else 0.0
-        t0, t1 = o.start_ts.astimezone(self.intra.local(o.start_ts).tzinfo).time(), self.intra.local(o.end_ts).time()
+        t0, t1 = (
+            o.start_ts.astimezone(self.intra.local(o.start_ts).tzinfo).time(),
+            self.intra.local(o.end_ts).time(),
+        )
         minutes = self.intra.schedule(t0, t1, n, front)
         base = np.floor(o.quantity / n)
         qty = np.full(n, base)
@@ -215,7 +357,9 @@ class Executor:
         venues = list(rng.choice(VENUES, n, p=self.md.venue_share[j]))
         return minutes[keep], qty[keep], [v for v, k in zip(venues, keep, strict=True) if k]
 
-    def _t1_continuous(self, o: TraderOrder, i: int, j: int, rng: np.random.Generator) -> tuple[list[ChildOrder], list[Fill]]:
+    def _t1_continuous(
+        self, o: TraderOrder, i: int, j: int, rng: np.random.Generator
+    ) -> tuple[list[ChildOrder], list[Fill]]:
         md = self.md
         s = side_sign(o.side)
         sig, adv, spr = self._sigma(i, j), self._adv(i, j), float(md.spread_bps[i, j])
@@ -226,18 +370,37 @@ class Executor:
         minutes, qty, venues = self._slices(o, i, j, rng)
         children, fills = [], []
         for m, q, v in zip(minutes, qty, venues, strict=True):
-            liq = Liquidity.MIDPOINT if v == "DARK" else (Liquidity.ADD if rng.random() < 0.45 else Liquidity.REMOVE)
+            liq = (
+                Liquidity.MIDPOINT
+                if v == "DARK"
+                else (Liquidity.ADD if rng.random() < 0.45 else Liquidity.REMOVE)
+            )
             otype = OrderType.MIDPOINT_PEG if v == "DARK" else OrderType.LIMIT
             ref = self._ref(i, j, float(m))
             px = ref["mid"] * (1 + s * imp / 1e4)
-            ch = self._child(o, v, str(otype), float(q), float(m) - 0.05, str(Tif.DAY), round(px * (1 + s * 0.002), 2))
+            ch = self._child(
+                o, v, str(otype), float(q), float(m) - 0.05, str(Tif.DAY), round(px * (1 + s * 0.002), 2)
+            )
             children.append(ch)
-            fills.append(self._fill(o, ch, float(m), px, float(q), str(liq), str(MarketState.CONTINUOUS_TRADING),
-                                    f"T1_{o.strategy}", {**ref, "impact_bps": round(imp, 4)}))
+            fills.append(
+                self._fill(
+                    o,
+                    ch,
+                    float(m),
+                    px,
+                    float(q),
+                    str(liq),
+                    str(MarketState.CONTINUOUS_TRADING),
+                    f"T1_{o.strategy}",
+                    {**ref, "impact_bps": round(imp, 4)},
+                )
+            )
         return children, fills
 
     # ------------------------------------------------------------------ T2
-    def _t2(self, o: TraderOrder, i: int, j: int, rng: np.random.Generator) -> tuple[list[ChildOrder], list[Fill]]:
+    def _t2(
+        self, o: TraderOrder, i: int, j: int, rng: np.random.Generator
+    ) -> tuple[list[ChildOrder], list[Fill]]:
         md = self.md
         s = side_sign(o.side)
         curve = self.intra.minute_curve()
@@ -256,29 +419,59 @@ class Executor:
             q = float(min(max(want, 0), cap, o.quantity - done))
             if (m - a) % 5 == 0 or bucket is None:
                 v = str(rng.choice(VENUES, p=md.venue_share[j]))
-                bucket = self._child(o, v, str(OrderType.MIDPOINT_PEG if v == "DARK" else OrderType.LIMIT),
-                                     float(min(o.quantity - done, max(cap, 1) * 5)), m, str(Tif.DAY), None)
+                bucket = self._child(
+                    o,
+                    v,
+                    str(OrderType.MIDPOINT_PEG if v == "DARK" else OrderType.LIMIT),
+                    float(min(o.quantity - done, max(cap, 1) * 5)),
+                    m,
+                    str(Tif.DAY),
+                    None,
+                )
                 children.append(bucket)
             if q <= 0:
                 continue
             behind = (target[k] - done - q) > 0 or want > cap
             ref = self._ref(i, j, m + 0.5)
             half = ref["ask"] - ref["mid"]
-            liq = Liquidity.MIDPOINT if bucket.venue_mic == "DARK" else Liquidity.REMOVE if behind else Liquidity.ADD
+            liq = (
+                Liquidity.MIDPOINT
+                if bucket.venue_mic == "DARK"
+                else Liquidity.REMOVE
+                if behind
+                else Liquidity.ADD
+            )
             px = ref["mid"] + (s * half if liq == Liquidity.REMOVE else 0.0)
-            fills.append(self._fill(o, bucket, m + 0.5, px, q, str(liq), str(MarketState.CONTINUOUS_TRADING), "T2_REPLAY",
-                                    {**ref, "interval_volume": cont * curve[m], "cap": cap}))
+            fills.append(
+                self._fill(
+                    o,
+                    bucket,
+                    m + 0.5,
+                    px,
+                    q,
+                    str(liq),
+                    str(MarketState.CONTINUOUS_TRADING),
+                    "T2_REPLAY",
+                    {**ref, "interval_volume": cont * curve[m], "cap": cap},
+                )
+            )
             done += q
         # child quantities = what each child was actually worked for
-        by_child = defaultdict(float)
+        by_child: dict[str, float] = defaultdict(float)
         for f in fills:
             by_child[f.child_order_id] += f.quantity
         for ch in children:
-            ch.quantity = max(by_child.get(ch.child_order_id, 0.0), 1.0) if by_child.get(ch.child_order_id) else ch.quantity
+            ch.quantity = (
+                max(by_child.get(ch.child_order_id, 0.0), 1.0)
+                if by_child.get(ch.child_order_id)
+                else ch.quantity
+            )
         return children, fills
 
     # ------------------------------------------------------------------ Phase 1 generator
-    def _generator(self, o: TraderOrder, i: int, j: int, rng: np.random.Generator) -> tuple[list[ChildOrder], list[Fill]]:
+    def _generator(
+        self, o: TraderOrder, i: int, j: int, rng: np.random.Generator
+    ) -> tuple[list[ChildOrder], list[Fill]]:
         """Price = VWAP x (1 + s c + xi): c injected cost, xi order-level noise (both in the answer key)."""
         key = o.params["answer_key"]
         s = side_sign(o.side)
@@ -288,14 +481,36 @@ class Executor:
         jit -= (jit * qty).sum() / qty.sum()  # slice jitter nets to zero at order level
         children, fills = [], []
         for m, q, v, e in zip(minutes, qty, venues, jit, strict=True):
-            liq = Liquidity.MIDPOINT if v == "DARK" else (Liquidity.ADD if rng.random() < 0.45 else Liquidity.REMOVE)
+            liq = (
+                Liquidity.MIDPOINT
+                if v == "DARK"
+                else (Liquidity.ADD if rng.random() < 0.45 else Liquidity.REMOVE)
+            )
             px = vwap * (1 + s * (key["injected_cost_bps"] + key["noise_bps"] + e) / 1e4)
-            ch = self._child(o, v, str(OrderType.MIDPOINT_PEG if v == "DARK" else OrderType.LIMIT), float(q), float(m) - 0.05,
-                             str(Tif.DAY), None)
+            ch = self._child(
+                o,
+                v,
+                str(OrderType.MIDPOINT_PEG if v == "DARK" else OrderType.LIMIT),
+                float(q),
+                float(m) - 0.05,
+                str(Tif.DAY),
+                None,
+            )
             children.append(ch)
             ref = self._ref(i, j, float(m))
-            fills.append(self._fill(o, ch, float(m), round(px, 4), float(q), str(liq), str(MarketState.CONTINUOUS_TRADING),
-                                    "GEN_VWAP", {**ref, "vwap_day": vwap}))
+            fills.append(
+                self._fill(
+                    o,
+                    ch,
+                    float(m),
+                    round(px, 4),
+                    float(q),
+                    str(liq),
+                    str(MarketState.CONTINUOUS_TRADING),
+                    "GEN_VWAP",
+                    {**ref, "vwap_day": vwap},
+                )
+            )
             fills[-1].price = round(px, 4)
         return children, fills
 

@@ -56,6 +56,7 @@ class RunOut(BaseModel):
     output_hash: str | None
     study_id: str | None
     study_step: int | None
+    execution_model: str | None = None
     error: dict[str, Any] | None = None
 
 

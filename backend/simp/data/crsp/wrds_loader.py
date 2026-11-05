@@ -55,16 +55,23 @@ class WrdsClient:
             pw = self.s.wrds_password.get_secret_value() if self.s.wrds_password else ""
             try:
                 self._conn = psycopg.connect(
-                    host=self.s.wrds_host, port=self.s.wrds_port, dbname="wrds", user=self.s.wrds_username,
-                    password=pw, sslmode="require", connect_timeout=20,
+                    host=self.s.wrds_host,
+                    port=self.s.wrds_port,
+                    dbname="wrds",
+                    user=self.s.wrds_username,
+                    password=pw,
+                    sslmode="require",
+                    connect_timeout=20,
                 )
             except psycopg.OperationalError as e:
-                raise SourceUnavailableError(f"cannot reach WRDS at {self.s.wrds_host}:{self.s.wrds_port}: {e}") from e
+                raise SourceUnavailableError(
+                    f"cannot reach WRDS at {self.s.wrds_host}:{self.s.wrds_port}: {e}"
+                ) from e
         return self._conn
 
     def fetch(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> pl.DataFrame:
         with self.connect().cursor() as cur:
-            cur.execute(sql, params)  # type: ignore[arg-type]
+            cur.execute(sql, params)
             cols = [d.name for d in cur.description or []]
             rows = cur.fetchall()
         return pl.DataFrame(rows, schema=cols, orient="row") if rows else pl.DataFrame(schema=cols)
@@ -81,7 +88,9 @@ class WrdsClient:
         expected = set(CONTRACTS[("crsp", dataset)].columns)
         missing = sorted(expected - live)
         if missing:
-            raise SchemaMismatchError(f"{schema}.{table} is missing documented columns {missing}; live has {sorted(live)}")
+            raise SchemaMismatchError(
+                f"{schema}.{table} is missing documented columns {missing}; live has {sorted(live)}"
+            )
 
     def release_range(self) -> tuple[date, date]:
         df = self.fetch("select min(dlycaldt) as a, max(dlycaldt) as b from crsp_q_stock.dsf_v2")

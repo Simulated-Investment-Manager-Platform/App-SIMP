@@ -15,7 +15,7 @@ public); every other read goes through the engine's look-ahead guard.
 from __future__ import annotations
 
 import math
-from datetime import time
+from datetime import datetime, time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -60,12 +60,12 @@ class IndexReplication:
             qend = {cal.index(d) for d in effs}
             for permno, ivs in md.mbr_start.items():
                 j = md.j(permno)
-                for a, b in ivs:
-                    if cal.is_session(a) and cal.index(a) not in qstart and cal.index(a) > 0:
-                        xi = cal.index(a) - 1
+                for d0, d1 in ivs:
+                    if cal.is_session(d0) and cal.index(d0) not in qstart and cal.index(d0) > 0:
+                        xi = cal.index(d0) - 1
                         self._add_off(xi, j, "ADD")
-                    if cal.is_session(b) and cal.index(b) not in qend and cal.index(b) < md.D - 1:
-                        self._add_off(cal.index(b), j, "DELETE")
+                    if cal.is_session(d1) and cal.index(d1) not in qend and cal.index(d1) < md.D - 1:
+                        self._add_off(cal.index(d1), j, "DELETE")
         self.reviews = e.ca_reviews
         self.events_by_declared: dict[int, list[int]] = {}
         for k, a in enumerate(md.actions):
@@ -104,28 +104,59 @@ class IndexReplication:
             out.setdefault(int(j), "UNMAPPED to BMLL listing")
         return out
 
-    def _order(self, decision: Decision, j: int, qty: float, reason: str, price: float, exec_i: int,
-               instruction: str = Instruction.TARGET_CLOSE, ts=None, source: str = DecisionPriceSource.PRIOR_CLOSE) -> PmOrder:  # type: ignore[no-untyped-def]
+    def _order(
+        self,
+        decision: Decision,
+        j: int,
+        qty: float,
+        reason: str,
+        price: float,
+        exec_i: int,
+        instruction: str = Instruction.TARGET_CLOSE,
+        ts: datetime | None = None,
+        source: str = DecisionPriceSource.PRIOR_CLOSE,
+    ) -> PmOrder:
         e = self.e
         md = e.md
         ts = ts or decision.decision_ts
         return PmOrder(
-            pm_order_id=e.ids.new(ts), run_id=e.run_id, fund_id=e.cfg.fund_id, decision_id=decision.decision_id,
-            permno=int(md.permnos[j]), listing_id=int(md.listing_id[j]) or None, side="BUY" if qty > 0 else "SELL",
-            quantity=float(abs(qty)), reason=str(reason), decision_ts=ts, decision_price=float(price),
-            decision_price_source=str(source), instruction=str(instruction), deadline_ts=close_ts(md.sessions[exec_i]),
-            urgency=str(Urgency.HIGH if reason in (Reason.INDEX_ADD, Reason.INDEX_DELETE, Reason.CORP_ACTION) else Urgency.MEDIUM),
-            limit_price=None, status="NEW", created_by=f"{self.name}@{self.version}", exec_date=md.sessions[exec_i],
+            pm_order_id=e.ids.new(ts),
+            run_id=e.run_id,
+            fund_id=e.cfg.fund_id,
+            decision_id=decision.decision_id,
+            permno=int(md.permnos[j]),
+            listing_id=int(md.listing_id[j]) or None,
+            side="BUY" if qty > 0 else "SELL",
+            quantity=float(abs(qty)),
+            reason=str(reason),
+            decision_ts=ts,
+            decision_price=float(price),
+            decision_price_source=str(source),
+            instruction=str(instruction),
+            deadline_ts=close_ts(md.sessions[exec_i]),
+            urgency=str(
+                Urgency.HIGH
+                if reason in (Reason.INDEX_ADD, Reason.INDEX_DELETE, Reason.CORP_ACTION)
+                else Urgency.MEDIUM
+            ),
+            limit_price=None,
+            status="NEW",
+            created_by=f"{self.name}@{self.version}",
+            exec_date=md.sessions[exec_i],
         )
 
-    def _decision(self, i: int, kind: str, exec_i: int, ts=None) -> Decision:  # type: ignore[no-untyped-def]
+    def _decision(self, i: int, kind: str, exec_i: int, ts: datetime | None = None) -> Decision:
         e = self.e
         ts = ts or close_ts(e.md.sessions[i])
-        d = Decision(e.ids.new(ts), e.run_id, e.cfg.fund_id, kind, e.md.sessions[i], e.md.sessions[exec_i], ts)
+        d = Decision(
+            e.ids.new(ts), e.run_id, e.cfg.fund_id, kind, e.md.sessions[i], e.md.sessions[exec_i], ts
+        )
         e.decisions.append(d)
         return d
 
-    def _basket(self, i: int, exec_i: int, member_i: int, kind: str, nav: float, holdings: np.ndarray) -> list[PmOrder]:
+    def _basket(
+        self, i: int, exec_i: int, member_i: int, kind: str, nav: float, holdings: np.ndarray
+    ) -> list[PmOrder]:
         """Target the cap-weighted basket of members at ``member_i`` with snapshot at session i."""
         e = self.e
         md = e.md
@@ -147,9 +178,17 @@ class IndexReplication:
         d = self._decision(i, kind, exec_i)
         d.target_weights_ref = d.decision_id
         for j in np.where(mem | (holdings != 0))[0]:
-            e.target_weights.append(TargetWeight(e.run_id, d.decision_id, int(md.permnos[j]), float(w[j]), "CRSP_CAP_PROXY",
-                                                 bool(mem[j] and not incl[j]), excl.get(int(j)) if mem[j] and not incl[j] else
-                                                 (None if mem[j] else "NOT_A_MEMBER")))
+            e.target_weights.append(
+                TargetWeight(
+                    e.run_id,
+                    d.decision_id,
+                    int(md.permnos[j]),
+                    float(w[j]),
+                    "CRSP_CAP_PROXY",
+                    bool(mem[j] and not incl[j]),
+                    excl.get(int(j)) if mem[j] and not incl[j] else (None if mem[j] else "NOT_A_MEMBER"),
+                )
+            )
         e.excluded_weight[md.sessions[exec_i]] = float(w_all[~incl & mem].sum())
         investable = nav * (1 - e.cfg.flows.cash_buffer_bps / 1e4)
         tgt = np.zeros(md.N)
@@ -157,7 +196,7 @@ class IndexReplication:
         tgt[ok] = np.floor(investable * w[ok] / px[ok])
         self.target_by_exec[exec_i] = w
         out = []
-        for j in np.where((tgt != holdings))[0]:
+        for j in np.where(tgt != holdings)[0]:
             dq = tgt[j] - holdings[j]
             if dq == 0 or not math.isfinite(px[j]):
                 continue
@@ -184,6 +223,33 @@ class IndexReplication:
         e = self.e
         md = e.md
         out: list[PmOrder] = []
+        # corporate-action exits: an unsupported event declared today on a held name
+        excl = None
+        day = md.sessions[i]
+        pending_events = [
+            k
+            for k, a in enumerate(md.actions)
+            if a.kind in UNSUPPORTED and a.declared is not None and a.declared <= day < a.ex
+        ]
+        for k in pending_events:  # re-checked daily: a partly filled exit is re-issued
+            a = md.actions[k]
+            excl = excl if excl is not None else self.excluded(i)
+            if a.j not in excl or i + 1 > e.i1 or md.sessions[i + 1] >= a.ex:
+                continue
+            # cancel any not-yet-executed buys decided before the event was declared
+            for orders in e.pending_pm.values():
+                for o in list(orders):
+                    if o.permno == a.permno and o.side == "BUY":
+                        orders.remove(o)
+                        o.status = "CANCELLED"
+                        o.flags.append("EXCLUDED_AFTER_DECISION")
+            held = e.projected_holdings(10**9)[a.j]
+            if held > 0:
+                d = self._decision(i, "CORP_ACTION_EXIT", i + 1)
+                out.append(self._order(d, a.j, -held, Reason.CORP_ACTION, float(md.prc[i, a.j]), i + 1))
+        # schedule exits now so the same evening's basket sees them in projected holdings
+        e._schedule(out)
+        out = []
         if i in self.quarterly:
             xi, mi = self.quarterly[i]
             out += self._basket(i, xi, mi, "QUARTERLY_REBALANCE", e.nav, e.projected_holdings(xi))
@@ -204,24 +270,6 @@ class IndexReplication:
                 q = math.floor(e.nav * w / px) - e.projected_holdings(xi)[j]
                 if q > 0:
                     out.append(self._order(d, j, q, Reason.INDEX_ADD, px, xi))
-        # corporate-action exits: an unsupported event declared today on a held name
-        excl = None
-        for k in self.events_by_declared.get(i, []):
-            a = md.actions[k]
-            excl = excl if excl is not None else self.excluded(i)
-            if a.j not in excl or i + 1 > e.i1 or md.sessions[i + 1] >= a.ex:
-                continue
-            # cancel any not-yet-executed buys decided before the event was declared
-            for xi, orders in e.pending_pm.items():
-                for o in list(orders):
-                    if o.permno == a.permno and o.side == "BUY":
-                        orders.remove(o)
-                        o.status = "CANCELLED"
-                        o.flags.append("EXCLUDED_AFTER_DECISION")
-            held = e.projected_holdings(10**9)[a.j]
-            if held > 0:
-                d = self._decision(i, "CORP_ACTION_EXIT", i + 1)
-                out.append(self._order(d, a.j, -held, Reason.CORP_ACTION, float(md.prc[i, a.j]), i + 1))
         return out
 
     def morning(self, i: int) -> list[PmOrder]:
@@ -236,8 +284,13 @@ class IndexReplication:
         px = md.prc[i - 1]
         nav_prev = e.nav
         pend = e.pending_pm.get(i, [])
-        committed = sum((1 if o.side == "BUY" else -1) * o.quantity * o.quantity_adjustment_factor * float(np.nan_to_num(px[md.j(o.permno)]))
-                        for o in pend)
+        committed = sum(
+            (1 if o.side == "BUY" else -1)
+            * o.quantity
+            * o.quantity_adjustment_factor
+            * float(np.nan_to_num(px[md.j(o.permno)]))
+            for o in pend
+        )
         liquid = e.ledger.cash + e.ledger.recv + e.ledger.pay
         excess = liquid + flow - committed - fc.cash_buffer_bps / 1e4 * (nav_prev + flow)
         min_ticket = max(fc.min_ticket_usd, fc.min_ticket_nav_bps / 1e4 * nav_prev)
@@ -264,7 +317,13 @@ class IndexReplication:
         we = np.where(elig, w, 0.0)
         we /= we.sum()
         ts = ny_ts(md.sessions[i], time(9, 0))
-        reason = Reason.SUBSCRIPTION if (flow > 0 and side > 0) else Reason.REDEMPTION if (flow < 0 and side < 0) else Reason.CASH_SWEEP
+        reason = (
+            Reason.SUBSCRIPTION
+            if (flow > 0 and side > 0)
+            else Reason.REDEMPTION
+            if (flow < 0 and side < 0)
+            else Reason.CASH_SWEEP
+        )
         d = self._decision(i - 1, f"FLOW_{reason}", i, ts=ts)
         out = []
         hold = e.projected_holdings(i)

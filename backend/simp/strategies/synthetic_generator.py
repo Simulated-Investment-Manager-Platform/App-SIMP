@@ -53,8 +53,48 @@ class SyntheticGenerator:
         n = int(rng.poisson(g.lam))
         adv = md.adv20[i]  # trailing, excludes today: known pre-open
         ok = md.member[i - 1] & md.mapped & np.isfinite(adv) & (adv > 0) & np.isfinite(md.prc[i - 1])
+        ts = ny_ts(md.sessions[i], time(9, 15))
+        out: list[PmOrder] = []
+        # names with a declared unsupported corporate action: never picked, and flattened before the ex-date
+        day = md.sessions[i]
+        pending = {
+            a.j
+            for a in md.actions
+            if a.kind in ("SO", "RI", "MG") and a.declared is not None and a.declared <= day < a.ex
+        }
+        for j in pending:
+            ok[j] = False
+            held = e.projected_holdings(i)[j]
+            if held != 0 and np.isfinite(md.prc[i - 1, j]):
+                d0 = Decision(
+                    e.ids.new(ts), e.run_id, e.cfg.fund_id, "CORP_ACTION_EXIT", md.sessions[i - 1], day, ts
+                )
+                e.decisions.append(d0)
+                out.append(
+                    PmOrder(
+                        pm_order_id=e.ids.new(ts),
+                        run_id=e.run_id,
+                        fund_id=e.cfg.fund_id,
+                        decision_id=d0.decision_id,
+                        permno=int(md.permnos[j]),
+                        listing_id=int(md.listing_id[j]),
+                        side="SELL" if held > 0 else "BUY",
+                        quantity=float(abs(held)),
+                        reason=str(Reason.CORP_ACTION),
+                        decision_ts=ts,
+                        decision_price=float(md.prc[i - 1, j]),
+                        decision_price_source=str(DecisionPriceSource.PRIOR_CLOSE),
+                        instruction="TARGET_CLOSE",
+                        deadline_ts=close_ts(day),
+                        urgency=str(Urgency.HIGH),
+                        limit_price=None,
+                        status="NEW",
+                        created_by=f"{self.name}@{self.version}",
+                        exec_date=day,
+                    )
+                )
         if n == 0 or not ok.any():
-            return []
+            return out
         p = np.where(ok, np.nan_to_num(adv) * np.nan_to_num(md.prc[i - 1]), 0.0)
         js = rng.choice(md.N, n, p=p / p.sum())
         x = truncated_pareto(rng, g.pareto_alpha, g.min_participation, g.max_participation, n)
@@ -63,22 +103,41 @@ class SyntheticGenerator:
         probs = np.array([g.instruction_mix[k] for k in insts])
         inst = rng.choice(insts, n, p=probs / probs.sum())
         c = rng.uniform(g.cost_min_bps, g.cost_max_bps, n)
-        ts = ny_ts(md.sessions[i], time(9, 15))
-        d = Decision(e.ids.new(ts), e.run_id, e.cfg.fund_id, "SYNTHETIC_DAILY", md.sessions[i - 1], md.sessions[i], ts)
+        d = Decision(
+            e.ids.new(ts), e.run_id, e.cfg.fund_id, "SYNTHETIC_DAILY", md.sessions[i - 1], md.sessions[i], ts
+        )
         e.decisions.append(d)
-        out = []
         for k in range(n):
             j = int(js[k])
             q = max(1, math.floor(x[k] * adv[j]))
             sig_bps = float(np.nan_to_num(md.vol_intraday[i - 1, j], nan=0.015)) * 1e4
             xi = float(rng.normal(0, sig_bps * math.sqrt(DURATION[str(inst[k])])))
-            out.append(PmOrder(
-                pm_order_id=e.ids.new(ts), run_id=e.run_id, fund_id=e.cfg.fund_id, decision_id=d.decision_id,
-                permno=int(md.permnos[j]), listing_id=int(md.listing_id[j]), side=str(sides[k]), quantity=float(q),
-                reason=str(Reason.SYNTHETIC_TEST), decision_ts=ts, decision_price=float(md.prc[i - 1, j]),
-                decision_price_source=str(DecisionPriceSource.PRIOR_CLOSE), instruction=str(inst[k]),
-                deadline_ts=close_ts(md.sessions[i]), urgency=str(Urgency.MEDIUM), limit_price=None, status="NEW",
-                created_by=f"{self.name}@{self.version}", exec_date=md.sessions[i],
-                answer_key={"injected_cost_bps": float(c[k]), "noise_bps": xi, "participation": float(x[k])},
-            ))
+            out.append(
+                PmOrder(
+                    pm_order_id=e.ids.new(ts),
+                    run_id=e.run_id,
+                    fund_id=e.cfg.fund_id,
+                    decision_id=d.decision_id,
+                    permno=int(md.permnos[j]),
+                    listing_id=int(md.listing_id[j]),
+                    side=str(sides[k]),
+                    quantity=float(q),
+                    reason=str(Reason.SYNTHETIC_TEST),
+                    decision_ts=ts,
+                    decision_price=float(md.prc[i - 1, j]),
+                    decision_price_source=str(DecisionPriceSource.PRIOR_CLOSE),
+                    instruction=str(inst[k]),
+                    deadline_ts=close_ts(md.sessions[i]),
+                    urgency=str(Urgency.MEDIUM),
+                    limit_price=None,
+                    status="NEW",
+                    created_by=f"{self.name}@{self.version}",
+                    exec_date=md.sessions[i],
+                    answer_key={
+                        "injected_cost_bps": float(c[k]),
+                        "noise_bps": xi,
+                        "participation": float(x[k]),
+                    },
+                )
+            )
         return out

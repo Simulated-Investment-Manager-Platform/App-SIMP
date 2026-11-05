@@ -10,7 +10,11 @@ import structlog
 
 
 def configure_logging() -> None:
-    renderer = structlog.processors.JSONRenderer() if os.environ.get("SIMP_LOG_FORMAT", "json") == "json" else structlog.dev.ConsoleRenderer()
+    renderer = (
+        structlog.processors.JSONRenderer()
+        if os.environ.get("SIMP_LOG_FORMAT", "json") == "json"
+        else structlog.dev.ConsoleRenderer()
+    )
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

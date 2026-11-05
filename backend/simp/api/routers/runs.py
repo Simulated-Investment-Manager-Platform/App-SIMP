@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from collections.abc import AsyncIterator
 from datetime import date
 from typing import Any
 
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import ValidationError
 from sqlalchemy import select
 from sse_starlette.sse import EventSourceResponse
@@ -26,8 +27,11 @@ from simp.errors import DataMissingError
 from simp.runs import orchestrator as orch
 
 router = APIRouter(tags=["runs"])
-RUN_COLS = ("run_id, fund_id, name, status, stage, progress, config_hash, code_version, data_label, data_snapshot_hashes, "
-            "submitted_by, submitted_at, started_at, finished_at, output_hash, study_id, study_step, error")
+RUN_COLS = (
+    "run_id, fund_id, name, status, stage, progress, config_hash, code_version, data_label, data_snapshot_hashes, "
+    "config->>'execution_model' as execution_model, "
+    "submitted_by, submitted_at, started_at, finished_at, output_hash, study_id, study_step, error"
+)
 
 
 def _run(run_id: str) -> dict[str, Any]:
@@ -47,9 +51,13 @@ def _f(x: Any) -> float:
 
 @router.get("/presets")
 def presets(_: User = Depends(current_user)) -> dict[str, Any]:
-    return {"presets": {k: RunConfig.model_validate(v).model_dump(mode="json") for k, v in PRESETS.items()},
-            "default": RunConfig().model_dump(mode="json"), "desk_policies": policy_names(),
-            "flow_presets": ["default", "notebook_seeded", "none", "custom"], "execution_models": ["T0", "T1", "T2", "T3"]}
+    return {
+        "presets": {k: RunConfig.model_validate(v).model_dump(mode="json") for k, v in PRESETS.items()},
+        "default": RunConfig().model_dump(mode="json"),
+        "desk_policies": policy_names(),
+        "flow_presets": ["default", "notebook_seeded", "none", "custom"],
+        "execution_models": ["T0", "T1", "T2", "T3"],
+    }
 
 
 @router.post("/runs/check")
@@ -79,22 +87,46 @@ def check(cfg: dict[str, Any], _: User = Depends(current_user)) -> dict[str, Any
     dates = lake.partition_dates("crsp", "dsf_v2")
     if dates:
         cov = dates[0] <= c.window.bootstrap and dates[-1] >= c.window.end
-        add("window", cov, f"CRSP sessions {dates[0]}..{dates[-1]}, run asks {c.window.bootstrap}..{c.window.end}",
-            None if cov else "Pull a wider window")
+        add(
+            "window",
+            cov,
+            f"CRSP sessions {dates[0]}..{dates[-1]}, run asks {c.window.bootstrap}..{c.window.end}",
+            None if cov else "Pull a wider window",
+        )
     label = lake.manifest_for(snap, "crsp", "dsf_v2")["data_label"]
     if c.execution_model == "T3":
-        add("execution model", False, "T3 runs inside the BMLL Data Lab only (bmll2.simulation)", "Use `simp lab t3-job`")
-    elif c.execution_model == "T2" and label != "SYNTHETIC" and not lake.partition_dates("bmll", "trades_plus"):
-        add("execution model", False, "T2 needs BMLL Trades Plus @SIP partitions", "Pull Trades Plus via a Data Lab job")
+        add(
+            "execution model",
+            False,
+            "T3 runs inside the BMLL Data Lab only (bmll2.simulation)",
+            "Use `simp lab t3-job`",
+        )
+    elif (
+        c.execution_model == "T2" and label != "SYNTHETIC" and not lake.partition_dates("bmll", "trades_plus")
+    ):
+        add(
+            "execution model",
+            False,
+            "T2 needs BMLL Trades Plus @SIP partitions",
+            "Pull Trades Plus via a Data Lab job",
+        )
     else:
         add("execution model", True, f"{c.execution_model} available on {label} data")
     md_dates = lake.partition_dates("derived", "market_daily")
-    add("BMLL daily figures", bool(md_dates), f"{len(md_dates)} sessions of market_daily" if md_dates else "missing",
-        None if md_dates else "Data -> Pull")
+    add(
+        "BMLL daily figures",
+        bool(md_dates),
+        f"{len(md_dates)} sessions of market_daily" if md_dates else "missing",
+        None if md_dates else "Data -> Pull",
+    )
     q = rows("select count(*) n from mapping_review where status='OPEN'")
     n = int(q[0]["n"]) if q else 0
-    add("mapping review", True, f"{n} unmapped name(s) in the review queue; policy '{c.unmapped_policy}'"
-        + (" will stop the run" if n and c.unmapped_policy == "stop" else ""))
+    add(
+        "mapping review",
+        True,
+        f"{n} unmapped name(s) in the review queue; policy '{c.unmapped_policy}'"
+        + (" will stop the run" if n and c.unmapped_policy == "stop" else ""),
+    )
     out["data_label"] = label
     return out
 
@@ -113,9 +145,15 @@ def submit(cfg: dict[str, Any], user: User = Depends(require("researcher"))) -> 
 
 
 @router.get("/runs", response_model=list[RunOut])
-def list_runs(fund_id: str | None = None, status: str | None = None, study_id: str | None = None, limit: int = 100,
-              _: User = Depends(current_user)) -> list[dict[str, Any]]:
-    w, p = [], {"l": limit}
+def list_runs(
+    fund_id: str | None = None,
+    status: str | None = None,
+    study_id: str | None = None,
+    limit: int = 100,
+    _: User = Depends(current_user),
+) -> list[dict[str, Any]]:
+    w: list[str] = []
+    p: dict[str, Any] = {"l": limit}
     if fund_id:
         w.append("fund_id=:f")
         p["f"] = fund_id
@@ -138,22 +176,43 @@ def compare(ids: str, _: User = Depends(current_user)) -> dict[str, Any]:
         s = r["summary"] or {}
         f = s.get("fund") or {}
         t = (s.get("tca") or {}).get("exec") or {}
-        out.append({"run_id": rid, "name": r["name"], "status": r["status"], "study_step": r["study_step"],
-                    "config_hash": r["config_hash"], "output_hash": r["output_hash"],
-                    "execution_model": r["config"]["execution_model"], "timing": r["config"]["timing"]["rule"],
-                    "td_net_bps": f.get("td_net_bps"), "td_gross_bps": f.get("td_gross_bps"), "te_bps": f.get("te_bps"),
-                    "annual_return": f.get("annual_return"), "ending_nav": f.get("ending_nav"), "cash_drag_bps": f.get("cash_drag_bps"),
-                    "exec_cost_bps": t.get("cost_bps"), "exec_cost_usd": t.get("cost_usd"), "notional": t.get("notional"),
-                    "netting_saved": (s.get("netting") or {}).get("saved_notional"),
-                    "provisional_dividends": s.get("provisional_dividends")})
-    out.sort(key=lambda x: (x["study_step"] if x["study_step"] is not None else 0))
+        out.append(
+            {
+                "run_id": rid,
+                "name": r["name"],
+                "status": r["status"],
+                "study_step": r["study_step"],
+                "config_hash": r["config_hash"],
+                "output_hash": r["output_hash"],
+                "execution_model": r["config"]["execution_model"],
+                "timing": r["config"]["timing"]["rule"],
+                "td_net_bps": f.get("td_net_bps"),
+                "td_gross_bps": f.get("td_gross_bps"),
+                "te_bps": f.get("te_bps"),
+                "annual_return": f.get("annual_return"),
+                "ending_nav": f.get("ending_nav"),
+                "cash_drag_bps": f.get("cash_drag_bps"),
+                "exec_cost_bps": t.get("cost_bps"),
+                "exec_cost_usd": t.get("cost_usd"),
+                "notional": t.get("notional"),
+                "netting_saved": (s.get("netting") or {}).get("saved_notional"),
+                "provisional_dividends": s.get("provisional_dividends"),
+            }
+        )
+    out.sort(key=lambda x: x["study_step"] if x["study_step"] is not None else 0)
     steps = []
     for a, b in zip(out, out[1:], strict=False):
         if a["td_net_bps"] is not None and b["td_net_bps"] is not None:
-            steps.append({"from": a["run_id"], "to": b["run_id"], "label": b["name"],
-                          "delta_td_bps": b["td_net_bps"] - a["td_net_bps"],
-                          "delta_te_bps": (b["te_bps"] or 0) - (a["te_bps"] or 0),
-                          "delta_nav": (b["ending_nav"] or 0) - (a["ending_nav"] or 0)})
+            steps.append(
+                {
+                    "from": a["run_id"],
+                    "to": b["run_id"],
+                    "label": b["name"],
+                    "delta_td_bps": b["td_net_bps"] - a["td_net_bps"],
+                    "delta_te_bps": (b["te_bps"] or 0) - (a["te_bps"] or 0),
+                    "delta_nav": (b["ending_nav"] or 0) - (a["ending_nav"] or 0),
+                }
+            )
     return {"runs": out, "steps": steps, "note": "Effects interact; the order of steps is fixed and printed."}
 
 
@@ -167,16 +226,24 @@ async def events(run_id: str, request: Request, after: int = 0) -> EventSourceRe
     """Server-sent events: stage / progress / log / error / done."""
     _run(run_id)
 
-    async def gen():  # type: ignore[no-untyped-def]
+    async def gen() -> AsyncIterator[dict[str, str]]:
         last = after
         idle = 0
         while True:
             if await request.is_disconnected():
                 return
-            evs = rows("select id, ts, kind, payload from run_event where run_id=:r and id>:a order by id limit 200", r=run_id, a=last)
+            evs = rows(
+                "select id, ts, kind, payload from run_event where run_id=:r and id>:a order by id limit 200",
+                r=run_id,
+                a=last,
+            )
             for e in evs:
                 last = int(e["id"])
-                yield {"id": str(last), "event": e["kind"], "data": json.dumps({"ts": e["ts"].isoformat(), **(e["payload"] or {})}, default=str)}
+                yield {
+                    "id": str(last),
+                    "event": e["kind"],
+                    "data": json.dumps({"ts": e["ts"].isoformat(), **(e["payload"] or {})}, default=str),
+                }
                 if e["kind"] in ("done", "error"):
                     return
             idle = 0 if evs else idle + 1
@@ -189,7 +256,10 @@ async def events(run_id: str, request: Request, after: int = 0) -> EventSourceRe
 
 @router.get("/runs/{run_id}/log")
 def run_log(run_id: str, _: User = Depends(current_user)) -> list[dict[str, Any]]:
-    return rows("select id, ts, kind, payload from run_event where run_id=:r and kind<>'progress' order by id", r=run_id)
+    return rows(
+        "select id, ts, kind, payload from run_event where run_id=:r and kind<>'progress' order by id",
+        r=run_id,
+    )
 
 
 @router.get("/runs/{run_id}/nav", response_model=list[NavPoint])
@@ -202,9 +272,17 @@ def nav(run_id: str, _: User = Depends(current_user)) -> list[dict[str, Any]]:
         if x["date"] > start:
             bl *= 1 + _f(x["bench_return_tr"])
             fl *= 1 + _f(x["fund_return"])
-        out.append({**{k: _f(v) if k not in ("date",) else v for k, v in x.items() if k in NavPoint.model_fields},
-                    "bench_return_official": x["bench_return_official"], "bench_level": bl, "fund_level": fl,
-                    "active_return": _f(x["fund_return"]) - _f(x["bench_return_tr"]) if x["date"] > start else 0.0})
+        out.append(
+            {
+                **{k: _f(v) if k not in ("date",) else v for k, v in x.items() if k in NavPoint.model_fields},
+                "bench_return_official": x["bench_return_official"],
+                "bench_level": bl,
+                "fund_level": fl,
+                "active_return": _f(x["fund_return"]) - _f(x["bench_return_tr"])
+                if x["date"] > start
+                else 0.0,
+            }
+        )
     return out
 
 
@@ -216,20 +294,34 @@ def benchmark(run_id: str, benchmark: str | None = None, _: User = Depends(curre
         for k, v in list(x.items()):
             if k != "date" and v is not None and not isinstance(v, str):
                 x[k] = float(v)
-    rep = fund_report(navs, date.fromisoformat(r["config"]["window"]["start"]), benchmark or r["config"]["benchmark"])
+    rep = fund_report(
+        navs, date.fromisoformat(r["config"]["window"]["start"]), benchmark or r["config"]["benchmark"]
+    )
     start = date.fromisoformat(r["config"]["window"]["start"])
-    act = [{"date": x["date"], "active": x["fund_return"] - x["bench_return_tr"]} for x in navs if x["date"] > start]
+    act = [
+        {"date": x["date"], "active": x["fund_return"] - x["bench_return_tr"]}
+        for x in navs
+        if x["date"] > start
+    ]
     roll = []
-    a = np.array([x["active"] for x in act])
-    for k in range(62, len(a)):
-        roll.append({"date": act[k]["date"], "te_63d_bps": float(np.std(a[k - 62 : k + 1], ddof=1) * math.sqrt(252) * 1e4)})
+    arr = np.array([x["active"] for x in act])
+    for n in range(62, len(arr)):
+        roll.append(
+            {
+                "date": act[n]["date"],
+                "te_63d_bps": float(np.std(arr[n - 62 : n + 1], ddof=1) * math.sqrt(252) * 1e4),
+            }
+        )
     s = r["summary"] or {}
     decomposition = None
     if r["study_id"]:
         st = one("select kind from study where study_id=:s", s=r["study_id"])
         if st and st["kind"] == "counterfactual_chain":
-            sib = rows("select run_id from run where study_id=:s and status='DONE' order by study_step", s=r["study_id"])
-            decomposition = compare(",".join(x["run_id"] for x in sib), _)["steps"]  # type: ignore[arg-type]
+            sib = rows(
+                "select run_id from run where study_id=:s and status='DONE' order by study_step",
+                s=r["study_id"],
+            )
+            decomposition = compare(",".join(x["run_id"] for x in sib), _)["steps"]
     single = None
     if rep.get("available"):
         single = [
@@ -237,21 +329,44 @@ def benchmark(run_id: str, benchmark: str | None = None, _: User = Depends(curre
             {"label": "Cash drag", "bps": rep["cash_drag_bps"]},
             {"label": "Explicit trading costs", "bps": -rep["explicit_costs_bps_pa"]},
             {"label": "Management fee", "bps": -rep["fees_bps_pa"]},
-            {"label": "Implicit costs, exclusions, timing & residual",
-             "bps": rep["td_net_bps"] - rep["cash_drag_bps"] + rep["explicit_costs_bps_pa"] + rep["fees_bps_pa"]},
+            {
+                "label": "Implicit costs, exclusions, timing & residual",
+                "bps": rep["td_net_bps"]
+                - rep["cash_drag_bps"]
+                + rep["explicit_costs_bps_pa"]
+                + rep["fees_bps_pa"],
+            },
             {"label": "Fund (TD net)", "bps": rep["td_net_bps"], "total": True},
         ]
-    return {"report": rep, "active": act, "rolling_te": roll, "decomposition_chain": decomposition, "decomposition_single": single,
-            "excluded_weight": s.get("excluded_weight"), "data_label": r["data_label"]}
+    return {
+        "report": rep,
+        "active": act,
+        "rolling_te": roll,
+        "decomposition_chain": decomposition,
+        "decomposition_single": single,
+        "excluded_weight": s.get("excluded_weight"),
+        "data_label": r["data_label"],
+    }
 
 
 @router.get("/runs/{run_id}/flows")
 def flows(run_id: str, _: User = Depends(current_user)) -> dict[str, Any]:
     _run(run_id)
-    fl = rows("select date, amount_usd, units, unit_nav_used, is_jump from flow where run_id=:r order by date", r=run_id)
-    cash = rows("select date, cash, receivables, payables, nav, cash_weight from nav_daily where run_id=:r order by date", r=run_id)
+    fl = rows(
+        "select date, amount_usd, units, unit_nav_used, is_jump from flow where run_id=:r order by date",
+        r=run_id,
+    )
+    cash = rows(
+        "select date, cash, receivables, payables, nav, cash_weight from nav_daily where run_id=:r order by date",
+        r=run_id,
+    )
     r = _run(run_id)
-    return {"flows": fl, "cash": cash, "buffer_bps": r["config"]["flows"]["cash_buffer_bps"], "config": r["config"]["flows"]}
+    return {
+        "flows": fl,
+        "cash": cash,
+        "buffer_bps": r["config"]["flows"]["cash_buffer_bps"],
+        "config": r["config"]["flows"],
+    }
 
 
 @router.get("/runs/{run_id}/holdings")
@@ -260,26 +375,54 @@ def holdings(run_id: str, on: date | None = None, _: User = Depends(current_user
     d = on or (one("select max(date) d from position_daily where run_id=:r", r=run_id) or {}).get("d")
     if d is None:
         return {"date": None, "rows": [], "excluded": []}
-    d = (one("select max(date) d from position_daily where run_id=:r and date<=:d", r=run_id, d=d) or {}).get("d")
+    d = (one("select max(date) d from position_daily where run_id=:r and date<=:d", r=run_id, d=d) or {}).get(
+        "d"
+    )
     navr = one("select nav from nav_daily where run_id=:r and date=:d", r=run_id, d=d)
-    dec = one("select decision_id, effective_date from decision where run_id=:r and target_weights_ref is not null and effective_date<=:d "
-              "order by effective_date desc limit 1", r=run_id, d=d)
-    tw = {x["permno"]: x for x in rows("select * from target_weight where decision_id=:x", x=dec["decision_id"])} if dec else {}
+    dec = one(
+        "select decision_id, effective_date from decision where run_id=:r and target_weights_ref is not null and effective_date<=:d "
+        "order by effective_date desc limit 1",
+        r=run_id,
+        d=d,
+    )
+    tw = (
+        {
+            x["permno"]: x
+            for x in rows("select * from target_weight where decision_id=:x", x=dec["decision_id"])
+        }
+        if dec
+        else {}
+    )
     from simp.api.routers.market import ticker_map
 
     tick = ticker_map()
     nav_v = float(navr["nav"]) if navr else 1.0
-    pos = rows("select permno, shares, close_price, market_value from position_daily where run_id=:r and date=:d order by market_value desc",
-               r=run_id, d=d)
+    pos = rows(
+        "select permno, shares, close_price, market_value from position_daily where run_id=:r and date=:d order by market_value desc",
+        r=run_id,
+        d=d,
+    )
     out = []
     for p in pos:
         t = tw.get(p["permno"])
         w = float(p["market_value"]) / nav_v
-        out.append({"permno": p["permno"], "ticker": tick.get(p["permno"]), "shares": float(p["shares"]), "price": float(p["close_price"]),
-                    "market_value": float(p["market_value"]), "weight": w, "target_weight": t["weight"] if t else None,
-                    "active_weight_bps": (w - t["weight"]) * 1e4 if t else None})
-    excl = [{"permno": k, "ticker": tick.get(k), "reason": v["exclusion_reason"], "index_weight": None}
-            for k, v in tw.items() if v["excluded_flag"]]
+        out.append(
+            {
+                "permno": p["permno"],
+                "ticker": tick.get(p["permno"]),
+                "shares": float(p["shares"]),
+                "price": float(p["close_price"]),
+                "market_value": float(p["market_value"]),
+                "weight": w,
+                "target_weight": t["weight"] if t else None,
+                "active_weight_bps": (w - t["weight"]) * 1e4 if t else None,
+            }
+        )
+    excl = [
+        {"permno": k, "ticker": tick.get(k), "reason": v["exclusion_reason"], "index_weight": None}
+        for k, v in tw.items()
+        if v["excluded_flag"]
+    ]
     return {"date": d, "decision": dec, "nav": nav_v, "rows": out, "excluded": excl}
 
 
@@ -297,9 +440,11 @@ def create_study(body: dict[str, Any], user: User = Depends(require("researcher"
 
 @router.get("/studies")
 def list_studies(_: User = Depends(current_user)) -> list[dict[str, Any]]:
-    return rows("select s.study_id, s.kind, s.name, s.created_by, s.created_at, count(r.run_id) runs, "
-                "sum(case when r.status='DONE' then 1 else 0 end) done from study s left join run r on r.study_id=s.study_id "
-                "group by s.study_id order by s.created_at desc")
+    return rows(
+        "select s.study_id, s.kind, s.name, s.created_by, s.created_at, count(r.run_id) runs, "
+        "sum(case when r.status='DONE' then 1 else 0 end) done from study s left join run r on r.study_id=s.study_id "
+        "group by s.study_id order by s.created_at desc"
+    )
 
 
 @router.get("/studies/{study_id}")
@@ -309,19 +454,23 @@ def get_study(study_id: str, _: User = Depends(current_user)) -> dict[str, Any]:
         raise HTTPException(404, "study not found")
     rs = rows(f"select {RUN_COLS} from run where study_id=:s order by study_step", s=study_id)  # noqa: S608
     done = [x["run_id"] for x in rs if x["status"] == "DONE"]
-    return {"study": s, "runs": rs, "compare": compare(",".join(done), _) if done else None}  # type: ignore[arg-type]
+    return {"study": s, "runs": rs, "compare": compare(",".join(done), _) if done else None}
 
 
 @router.delete("/runs/{run_id}")
 def delete_run(run_id: str, _: User = Depends(require("admin"))) -> dict[str, str]:
-    with get_engine().begin() as c:
-        c.execute(S.run.delete().where(S.run.c.run_id == run_id))
+    _run(run_id)
+    orch.delete_run(run_id)
     return {"deleted": run_id}
 
 
 @router.get("/funds/{fund_id}/runs/latest")
 def latest_run(fund_id: str, _: User = Depends(current_user)) -> dict[str, Any] | None:
     with get_engine().connect() as c:
-        r = c.execute(select(S.run.c.run_id).where(S.run.c.fund_id == fund_id, S.run.c.status == "DONE")
-                      .order_by(S.run.c.finished_at.desc()).limit(1)).first()
+        r = c.execute(
+            select(S.run.c.run_id)
+            .where(S.run.c.fund_id == fund_id, S.run.c.status == "DONE")
+            .order_by(S.run.c.finished_at.desc())
+            .limit(1)
+        ).first()
     return {"run_id": r[0]} if r else None

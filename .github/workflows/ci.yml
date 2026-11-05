@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: simp, POSTGRES_PASSWORD: simp, POSTGRES_DB: simp_test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U simp" --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults: { run: { working-directory: backend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv lock --check            # lockfile and pyproject.toml must agree
+      - run: uv sync --frozen --all-extras
+      - run: uv run ruff check simp tests scripts
+      - run: uv run ruff format --check simp tests scripts
+      - run: uv run mypy simp
+      - run: uv run pytest --cov=simp --cov-report=term
+        env:
+          SIMP_DATABASE_URL: postgresql+psycopg://simp:simp@127.0.0.1:5432/simp_test
+      - name: OpenAPI contract
+        run: |
+          uv run python scripts/update_openapi.py
+          git diff --exit-code tests/golden/openapi.json
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: frontend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build

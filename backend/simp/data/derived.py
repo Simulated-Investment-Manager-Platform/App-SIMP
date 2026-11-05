@@ -38,19 +38,40 @@ def build_market_daily(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFr
     imb = raw[("bmll", "auction_imbalance")]
     keys = _primary_by_permno_date(smap, dsf)
 
-    auc = ct.filter(pl.col("ClassificationName") == "LIT_CLOSING_AUCTION").group_by("ListingId", "Date").agg(
-        pl.col("TradeVolume").sum().alias("auction_volume_raw"), pl.col("TradeNotionalUSD").sum().alias("auction_notional_raw")
+    auc = (
+        ct.filter(pl.col("ClassificationName") == "LIT_CLOSING_AUCTION")
+        .group_by("ListingId", "Date")
+        .agg(
+            pl.col("TradeVolume").sum().alias("auction_volume_raw"),
+            pl.col("TradeNotionalUSD").sum().alias("auction_notional_raw"),
+        )
     )
-    addressable = ct.filter(pl.col("ClassificationName").is_in(["LIT_CONTINUOUS", "LIT_CLOSING_AUCTION", "LIT_OPENING_AUCTION", "DARK"])).group_by(
-        "ListingId", "Date"
-    ).agg(pl.col("TradeVolume").sum().alias("addr_volume"))
+    addressable = (
+        ct.filter(
+            pl.col("ClassificationName").is_in(
+                ["LIT_CONTINUOUS", "LIT_CLOSING_AUCTION", "LIT_OPENING_AUCTION", "DARK"]
+            )
+        )
+        .group_by("ListingId", "Date")
+        .agg(pl.col("TradeVolume").sum().alias("addr_volume"))
+    )
 
     md = (
-        keys.join(da.rename({"ListingId": "listing_id", "Date": "date"}), on=["listing_id", "date"], how="left")
+        keys.join(
+            da.rename({"ListingId": "listing_id", "Date": "date"}), on=["listing_id", "date"], how="left"
+        )
         .join(auc.rename({"ListingId": "listing_id", "Date": "date"}), on=["listing_id", "date"], how="left")
-        .join(addressable.rename({"ListingId": "listing_id", "Date": "date"}), on=["listing_id", "date"], how="left")
+        .join(
+            addressable.rename({"ListingId": "listing_id", "Date": "date"}),
+            on=["listing_id", "date"],
+            how="left",
+        )
         .join(imb.rename({"ListingId": "listing_id", "Date": "date"}), on=["listing_id", "date"], how="left")
-        .join(dsf.select("permno", pl.col("dlycaldt").alias("date"), "dlyprc", "dlyvol"), on=["permno", "date"], how="left")
+        .join(
+            dsf.select("permno", pl.col("dlycaldt").alias("date"), "dlyprc", "dlyvol"),
+            on=["permno", "date"],
+            how="left",
+        )
         .sort("permno", "date")
     )
     md = md.with_columns(
@@ -59,7 +80,11 @@ def build_market_daily(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFr
         # trailing windows exclude today: known before the session starts
         pl.col("volume").shift(1).rolling_mean(20, min_samples=10).over("permno").alias("adv20"),
         pl.col("volume").shift(1).rolling_mean(60, min_samples=20).over("permno").alias("adv60"),
-        pl.col("auction_volume_raw").shift(1).rolling_median(20, min_samples=10).over("permno").alias("auc_median20"),
+        pl.col("auction_volume_raw")
+        .shift(1)
+        .rolling_median(20, min_samples=10)
+        .over("permno")
+        .alias("auc_median20"),
     )
     out = md.select(
         "permno",
@@ -67,11 +92,19 @@ def build_market_daily(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFr
         "date",
         pl.col("VWAP").fill_null(pl.col("dlyprc")).alias("vwap"),
         pl.col("TWAP").fill_null(pl.col("dlyprc")).alias("twap"),
-        pl.col("ClosingAuctionPrice|Executed").fill_nan(None).fill_null(pl.col("dlyprc")).alias("close_auction_price"),
+        pl.col("ClosingAuctionPrice|Executed")
+        .fill_nan(None)
+        .fill_null(pl.col("dlyprc"))
+        .alias("close_auction_price"),
         pl.col("OpeningAuctionPrice|Executed").fill_null(pl.col("dlyprc")).alias("open_auction_price"),
         pl.col("auction_volume_raw").fill_null(pl.col("auc_median20")).fill_null(0.0).alias("auction_volume"),
-        (pl.col("auction_volume_raw").fill_null(pl.col("auc_median20")).fill_null(0.0) * pl.col("dlyprc")).alias("auction_notional"),
-        (pl.when(pl.col("ImbalanceSide") == "SELL").then(-1.0).otherwise(1.0) * pl.col("ImbalanceQuantity").fill_null(0.0)).alias("imbalance_qty"),
+        (
+            pl.col("auction_volume_raw").fill_null(pl.col("auc_median20")).fill_null(0.0) * pl.col("dlyprc")
+        ).alias("auction_notional"),
+        (
+            pl.when(pl.col("ImbalanceSide") == "SELL").then(-1.0).otherwise(1.0)
+            * pl.col("ImbalanceQuantity").fill_null(0.0)
+        ).alias("imbalance_qty"),
         pl.col("PairedQuantity").fill_null(0.0).alias("paired_qty"),
         "volume",
         "adv20",
@@ -88,8 +121,14 @@ def build_market_daily(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFr
 
 
 def build_venue_share(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFrame) -> pl.DataFrame:
-    ct = raw[("bmll", "classified_trades")].filter(pl.col("ClassificationName").is_in(["LIT_CONTINUOUS", "DARK"]))
+    ct = raw[("bmll", "classified_trades")].filter(
+        pl.col("ClassificationName").is_in(["LIT_CONTINUOUS", "DARK"])
+    )
     lid = smap.select("permno", pl.col("listing_id").alias("ListingId")).unique()
-    v = ct.join(lid, on="ListingId").group_by("permno", "ExecutionVenue").agg(pl.col("TradeVolume").sum().alias("v"))
+    v = (
+        ct.join(lid, on="ListingId")
+        .group_by("permno", "ExecutionVenue")
+        .agg(pl.col("TradeVolume").sum().alias("v"))
+    )
     v = v.with_columns((pl.col("v") / pl.col("v").sum().over("permno")).alias("share"))
     return v.select("permno", pl.col("ExecutionVenue").alias("venue"), "share").sort("permno", "venue")

@@ -9,7 +9,7 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Engine, Table, create_engine, insert
 
@@ -33,7 +33,7 @@ def _cell(v: Any) -> str:
     if isinstance(v, datetime):
         if v.tzinfo is None:
             v = v.replace(tzinfo=UTC)
-        return v.isoformat()
+        return str(v.isoformat())
     if isinstance(v, date):
         return v.isoformat()
     if isinstance(v, bool):
@@ -55,12 +55,16 @@ def _json_default(o: Any) -> Any:
     raise TypeError(type(o))
 
 
-def clean_json(v: Any) -> Any:
-    """Make numpy scalars / NaN JSON-safe."""
+def clean_json[T](v: T) -> T:
+    """Make numpy scalars / NaN JSON-safe (same structure in, same structure out)."""
+    return cast(T, _clean(v))
+
+
+def _clean(v: Any) -> Any:
     if isinstance(v, dict):
-        return {k: clean_json(x) for k, x in v.items()}
+        return {k: _clean(x) for k, x in v.items()}
     if isinstance(v, list | tuple):
-        return [clean_json(x) for x in v]
+        return [_clean(x) for x in v]
     if hasattr(v, "item") and not isinstance(v, str):
         v = v.item()
     if isinstance(v, Decimal):
@@ -90,5 +94,7 @@ def bulk_insert(engine: Engine, table: Table, columns: Sequence[str], rows: Iter
             raw.close()
     else:
         with engine.begin() as conn:
-            conn.execute(insert(table), [dict(zip(columns, (clean_json(v) for v in r), strict=True)) for r in rows])
+            conn.execute(
+                insert(table), [dict(zip(columns, (clean_json(v) for v in r), strict=True)) for r in rows]
+            )
     return len(rows)

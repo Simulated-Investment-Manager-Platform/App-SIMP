@@ -62,3 +62,7 @@ class SourceUnavailableError(SimpError):
 
 class SchemaMismatchError(SimpError):
     """A live source's columns differ from the documented schema."""
+
+
+class CashShortfallError(SimpError):
+    """Net liquid cash went negative: the fund would be borrowing."""

@@ -34,7 +34,11 @@ def fund_report(nav: list[dict[str, Any]], start: date, benchmark: str = "CRSP_V
     rb = np.array([x if x is not None else np.nan for x in rb_raw], float)
     rbx = np.array([r["bench_return_pr"] for r in rows], float)
     bench = rb if benchmark == "SP500_TR" and np.isfinite(rb).all() else ra
-    bench_label = "S&P 500 TR (official, vendor)" if bench is rb else "CRSP S&P 500 cap-weighted with dividends (vwretd)"
+    bench_label = (
+        "S&P 500 TR (official, vendor)"
+        if bench is rb
+        else "CRSP S&P 500 cap-weighted with dividends (vwretd)"
+    )
     un = np.array([r["unit_nav"] for r in rows], float)
     active = rf - bench
     cashw = np.array([r["cash_weight"] for r in rows], float)
@@ -49,16 +53,29 @@ def fund_report(nav: list[dict[str, Any]], start: date, benchmark: str = "CRSP_V
     return {
         "available": True,
         "window": {"start": str(rows[0]["date"]), "end": str(rows[-1]["date"]), "sessions": len(rows)},
-        "benchmark": benchmark, "benchmark_label": bench_label,
-        "annual_return": ann_return(rf), "annual_return_gross": ann_return(rg), "benchmark_annual_return": ann_return(bench),
-        "td_net_bps": (ann_return(rf) - ann_return(bench)) * 1e4, "td_gross_bps": (ann_return(rg) - ann_return(bench)) * 1e4,
+        "benchmark": benchmark,
+        "benchmark_label": bench_label,
+        "annual_return": ann_return(rf),
+        "annual_return_gross": ann_return(rg),
+        "benchmark_annual_return": ann_return(bench),
+        "td_net_bps": (ann_return(rf) - ann_return(bench)) * 1e4,
+        "td_gross_bps": (ann_return(rg) - ann_return(bench)) * 1e4,
         "te_bps": float(np.std(active, ddof=1) * math.sqrt(252) * 1e4),
-        "volatility": vol, "max_drawdown": max_drawdown(un), "sharpe_rf0": ann_return(rf) / vol if vol else float("nan"),
+        "volatility": vol,
+        "max_drawdown": max_drawdown(un),
+        "sharpe_rf0": ann_return(rf) / vol if vol else float("nan"),
         "beta": beta,
-        "cum_return": float(un[-1] / (un[0] / (1 + rf[0])) - 1), "ending_nav": float(rows[-1]["nav"]), "ending_unit_nav": float(un[-1]),
-        "worst_days": [{"date": str(rows[k]["date"]), "fund_return": float(rf[k]), "bench_return": float(bench[k])} for k in worst],
-        "cash_drag_bps": cash_drag * 1e4, "avg_cash_weight": float(cashw.mean()),
-        "explicit_costs_bps_pa": costs_usd / avg_nav / years * 1e4, "fees_bps_pa": fees_usd / avg_nav / years * 1e4,
+        "cum_return": float(un[-1] / (un[0] / (1 + rf[0])) - 1),
+        "ending_nav": float(rows[-1]["nav"]),
+        "ending_unit_nav": float(un[-1]),
+        "worst_days": [
+            {"date": str(rows[k]["date"]), "fund_return": float(rf[k]), "bench_return": float(bench[k])}
+            for k in worst
+        ],
+        "cash_drag_bps": cash_drag * 1e4,
+        "avg_cash_weight": float(cashw.mean()),
+        "explicit_costs_bps_pa": costs_usd / avg_nav / years * 1e4,
+        "fees_bps_pa": fees_usd / avg_nav / years * 1e4,
         "proxy_gap_bps": (ann_return(ra) - ann_return(rb)) * 1e4 if np.isfinite(rb).all() else None,
         "price_vs_total_bps": (ann_return(ra) - ann_return(rbx)) * 1e4,
         "flows_net_usd": float(sum(r["flow_usd"] or 0 for r in rows)),
@@ -66,7 +83,9 @@ def fund_report(nav: list[dict[str, Any]], start: date, benchmark: str = "CRSP_V
     }
 
 
-def concentration_by_date(tca: list[dict[str, Any]], reasons: tuple[str, ...] = ("INDEX_REBALANCE", "INDEX_ADD", "INDEX_DELETE")) -> list[dict[str, Any]]:
+def concentration_by_date(
+    tca: list[dict[str, Any]], reasons: tuple[str, ...] = ("INDEX_REBALANCE", "INDEX_ADD", "INDEX_DELETE")
+) -> list[dict[str, Any]]:
     by: dict[date, list[float]] = {}
     for r in tca:
         if r["reason"] in reasons and r["exec_notional"]:
@@ -76,6 +95,13 @@ def concentration_by_date(tca: list[dict[str, Any]], reasons: tuple[str, ...] = 
         if len(ns) < 10:
             continue
         xs, ys, top10 = concentration_curve(np.array(ns))
-        out.append({"date": str(d), "orders": len(ns), "notional": float(sum(ns)), "top10_share": top10,
-                    "curve": [[float(a), float(b)] for a, b in zip(xs, ys, strict=True)]})
+        out.append(
+            {
+                "date": str(d),
+                "orders": len(ns),
+                "notional": float(sum(ns)),
+                "top10_share": top10,
+                "curve": [[float(a), float(b)] for a, b in zip(xs, ys, strict=True)],
+            }
+        )
     return out

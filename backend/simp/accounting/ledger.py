@@ -50,10 +50,31 @@ class Ledger:
     def __post_init__(self) -> None:
         self.qty = np.zeros(self.n_sec)
 
-    def post(self, ts: datetime, account: str, amount: float, ref_type: str, ref_id: str | None,
-             permno: int | None = None, quantity: float = 0.0, j: int | None = None) -> None:
-        self.entries.append(LedgerEntry(self.ids.new(ts), self.run_id, self.fund_id, ts, account, permno,
-                                        round(amount, 6), quantity, ref_type, ref_id))
+    def post(
+        self,
+        ts: datetime,
+        account: str,
+        amount: float,
+        ref_type: str,
+        ref_id: str | None,
+        permno: int | None = None,
+        quantity: float = 0.0,
+        j: int | None = None,
+    ) -> None:
+        self.entries.append(
+            LedgerEntry(
+                self.ids.new(ts),
+                self.run_id,
+                self.fund_id,
+                ts,
+                account,
+                permno,
+                round(amount, 6),
+                quantity,
+                ref_type,
+                ref_id,
+            )
+        )
         if account == Account.CASH:
             self.cash += amount
         elif account == Account.RECEIVABLE:
@@ -66,7 +87,17 @@ class Ledger:
             self.memo[account] += amount
 
     # ---------------------------------------------------------------- events
-    def trade(self, ts: datetime, settle: date, j: int, permno: int, qty_signed: float, price: float, costs: float, fill_id: str) -> None:
+    def trade(
+        self,
+        ts: datetime,
+        settle: date,
+        j: int,
+        permno: int,
+        qty_signed: float,
+        price: float,
+        costs: float,
+        fill_id: str,
+    ) -> None:
         gross = qty_signed * price
         self.post(ts, Account.SECURITY, gross, "FILL", fill_id, permno, qty_signed, j)
         amt = -(gross + costs)  # buy: payable -(gross+costs); sell: receivable (|gross| - costs)
@@ -108,13 +139,29 @@ class Ledger:
         held = self.qty != 0
         return float(self.cash + np.dot(self.qty[held], np.nan_to_num(close[held])) + self.recv + self.pay)
 
-    def check_identity(self, day: date, close: np.ndarray, engine_nav: float, units: float, unit_nav: float,
-                       engine_qty: np.ndarray, tol: float = 0.01) -> None:
+    def check_identity(
+        self,
+        day: date,
+        close: np.ndarray,
+        engine_nav: float,
+        units: float,
+        unit_nav: float,
+        engine_qty: np.ndarray,
+        tol: float = 0.01,
+    ) -> None:
         ln = self.nav(close)
         if abs(ln - engine_nav) > tol:
-            raise NavIdentityError(f"ledger NAV {ln:,.4f} != engine NAV {engine_nav:,.4f} (diff {ln - engine_nav:,.4f})", session=day)
+            raise NavIdentityError(
+                f"ledger NAV {ln:,.4f} != engine NAV {engine_nav:,.4f} (diff {ln - engine_nav:,.4f})",
+                session=day,
+            )
         if not np.array_equal(self.qty, engine_qty):
             bad = int(np.argmax(self.qty != engine_qty))
-            raise NavIdentityError(f"position break at security index {bad}: ledger {self.qty[bad]} engine {engine_qty[bad]}", session=day)
+            raise NavIdentityError(
+                f"position break at security index {bad}: ledger {self.qty[bad]} engine {engine_qty[bad]}",
+                session=day,
+            )
         if units > 0 and abs(units * unit_nav - engine_nav) > max(tol, abs(engine_nav) * 1e-12):
-            raise NavIdentityError(f"units x unit NAV {units * unit_nav:,.4f} != NAV {engine_nav:,.4f}", session=day)
+            raise NavIdentityError(
+                f"units x unit NAV {units * unit_nav:,.4f} != NAV {engine_nav:,.4f}", session=day
+            )

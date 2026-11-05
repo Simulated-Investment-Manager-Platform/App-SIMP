@@ -19,9 +19,21 @@ from simp.settings import get_settings
 
 def create_job(kind: str, source: str, args: dict[str, Any], user: str) -> str:
     now = datetime.now(UTC)
-    jid = ulid_from(now, int.from_bytes(hashlib.sha256(f"{kind}{time.time_ns()}".encode()).digest()[:10], "big"))
+    jid = ulid_from(
+        now, int.from_bytes(hashlib.sha256(f"{kind}{time.time_ns()}".encode()).digest()[:10], "big")
+    )
     with get_engine().begin() as c:
-        c.execute(S.data_job.insert().values(job_id=jid, kind=kind, source=source, status="QUEUED", args=args, created_by=user, created_at=now))
+        c.execute(
+            S.data_job.insert().values(
+                job_id=jid,
+                kind=kind,
+                source=source,
+                status="QUEUED",
+                args=args,
+                created_by=user,
+                created_at=now,
+            )
+        )
     if get_settings().queue == "inline":
         threading.Thread(target=_safe, args=(jid,), daemon=True).start()
     else:
@@ -54,15 +66,29 @@ def execute_job(jid: str) -> dict[str, Any]:
         if job["source"] == "synthetic":
             snap = pull_synthetic(lake, int(a.get("seed", get_settings().synthetic_seed)))
         else:
-            snap = pull_live(lake, date.fromisoformat(a.get("start", "2022-03-01")), date.fromisoformat(a.get("end", "2026-07-31")))
+            snap = pull_live(
+                lake,
+                date.fromisoformat(a.get("start", "2022-03-01")),
+                date.fromisoformat(a.get("end", "2026-07-31")),
+            )
         reviews = seed_reviews(snap)
         result = {"snapshot": snap, **reviews}
         with eng.begin() as c:
-            c.execute(update(S.data_job).where(S.data_job.c.job_id == jid).values(status="DONE", result=clean_json(result),
-                                                                              finished_at=datetime.now(UTC)))
+            c.execute(
+                update(S.data_job)
+                .where(S.data_job.c.job_id == jid)
+                .values(status="DONE", result=clean_json(result), finished_at=datetime.now(UTC))
+            )
         return result
     except Exception as e:
         with eng.begin() as c:
-            c.execute(update(S.data_job).where(S.data_job.c.job_id == jid).values(
-                status="FAILED", error=f"{type(e).__name__}: {e}\n{traceback.format_exc()[-3000:]}", finished_at=datetime.now(UTC)))
+            c.execute(
+                update(S.data_job)
+                .where(S.data_job.c.job_id == jid)
+                .values(
+                    status="FAILED",
+                    error=f"{type(e).__name__}: {e}\n{traceback.format_exc()[-3000:]}",
+                    finished_at=datetime.now(UTC),
+                )
+            )
         raise

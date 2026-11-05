@@ -49,9 +49,12 @@ def db_upgrade() -> None:
 
 # ------------------------------------------------------------------ data
 @data_app.command("pull")
-def data_pull(source: str = typer.Option(None, help="synthetic | live (default: SIMP_DATA_SOURCE)"),
-              seed: int = typer.Option(None, help="synthetic generator seed"),
-              start: str = "2022-03-01", end: str = "2026-07-31") -> None:
+def data_pull(
+    source: str = typer.Option(None, help="synthetic | live (default: SIMP_DATA_SOURCE)"),
+    seed: int = typer.Option(None, help="synthetic generator seed"),
+    start: str = "2022-03-01",
+    end: str = "2026-07-31",
+) -> None:
     """Pull CRSP (WRDS) + BMLL into the lake, build derived datasets, pin a snapshot."""
     from datetime import date
 
@@ -64,7 +67,11 @@ def data_pull(source: str = typer.Option(None, help="synthetic | live (default: 
     src = source or s.data_source
     t = time.time()
     lake = Lake()
-    snap = pull_synthetic(lake, seed or s.synthetic_seed) if src == "synthetic" else pull_live(lake, date.fromisoformat(start), date.fromisoformat(end))
+    snap = (
+        pull_synthetic(lake, seed or s.synthetic_seed)
+        if src == "synthetic"
+        else pull_live(lake, date.fromisoformat(start), date.fromisoformat(end))
+    )
     seed_reference()
     res = seed_reviews(snap)
     _echo({"snapshot": snap, "source": src, "seconds": round(time.time() - t, 1), **res})
@@ -85,7 +92,15 @@ def register_bmll(directory: Path) -> None:
             continue
         df = pl.read_parquet(p)
         dcol = None if ds == "reference_listing" else "Date"
-        m = lake.write("bmll", ds, df, date_col=dcol, query_args={"staged_from": str(directory)}, sdk_version="bmll", data_label="BMLL")
+        m = lake.write(
+            "bmll",
+            ds,
+            df,
+            date_col=dcol,
+            query_args={"staged_from": str(directory)},
+            sdk_version="bmll",
+            data_label="BMLL",
+        )
         typer.echo(f"{ds}: {m.row_count} rows, manifest {m.content_hash()[:12]}")
 
 
@@ -93,7 +108,12 @@ def register_bmll(directory: Path) -> None:
 def data_manifests() -> None:
     from simp.data.lake.store import Lake
 
-    _echo([{k: m[k] for k in ("source", "dataset", "row_count", "data_label", "pulled_at", "manifest_hash")} for m in Lake().manifests()])
+    _echo(
+        [
+            {k: m[k] for k in ("source", "dataset", "row_count", "data_label", "pulled_at", "manifest_hash")}
+            for m in Lake().manifests()
+        ]
+    )
 
 
 @data_app.command("check-wrds")
@@ -121,8 +141,14 @@ def map_report(snapshot: str = typer.Option(None)) -> None:
     snap = snapshot or latest_snapshot()
     sm = lake.read(snap, "derived", "security_map")
     q = pl.read_parquet(lake.root / "derived" / "security_map" / "review_queue.parquet")
-    _echo({"snapshot": snap, "rows": sm.height, "by_method": dict(sm.group_by("method").len().iter_rows()),
-           "review_queue": q.with_columns(pl.all().cast(pl.Utf8)).to_dicts()})
+    _echo(
+        {
+            "snapshot": snap,
+            "rows": sm.height,
+            "by_method": dict(sm.group_by("method").len().iter_rows()),
+            "review_queue": q.with_columns(pl.all().cast(pl.Utf8)).to_dicts(),
+        }
+    )
 
 
 @map_app.command("build")
@@ -138,7 +164,16 @@ def map_build() -> None:
     sm = lake.read(snap, "derived", "security_map")
     out = lake.root / "exports" / "bmll_identifier_mapping.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
-    sm.select("permno", pl.col("listing_id").alias("bmll_id"), "valid_from", "valid_to", "isin", "ticker", "opol", "method").write_csv(out)
+    sm.select(
+        "permno",
+        pl.col("listing_id").alias("bmll_id"),
+        "valid_from",
+        "valid_to",
+        "isin",
+        "ticker",
+        "opol",
+        "method",
+    ).write_csv(out)
     typer.echo(f"wrote {out} ({sm.height} rows)")
 
 
@@ -160,10 +195,16 @@ def _parse_sets(sets: list[str]) -> dict[str, Any]:
 
 
 @app.command("run")
-def run_cmd(preset: str = typer.Option("index_t1_flows", help="handoff_replay | index_t1_flows | index_t0_effective | phase1_generator"),
-            config: Path = typer.Option(None, help="JSON run config"),
-            set_: list[str] = typer.Option([], "--set", help="override, e.g. --set execution_model=T0 --set flows.sigma_bps=25"),
-            wait: bool = typer.Option(True, help="run in this process and wait")) -> None:
+def run_cmd(
+    preset: str = typer.Option(
+        "index_t1_flows", help="handoff_replay | index_t1_flows | index_t0_effective | phase1_generator"
+    ),
+    config: Path = typer.Option(None, help="JSON run config"),
+    set_: list[str] = typer.Option(
+        [], "--set", help="override, e.g. --set execution_model=T0 --set flows.sigma_bps=25"
+    ),
+    wait: bool = typer.Option(True, help="run in this process and wait"),
+) -> None:
     """Submit (and by default execute) a run."""
     from simp.config.run_config import PRESETS, RunConfig
     from simp.runs.orchestrator import _merge, execute, submit
@@ -189,8 +230,17 @@ def report_cmd(run_id: str) -> None:
     with get_engine().connect() as c:
         r = c.execute(select(S.run).where(S.run.c.run_id == run_id)).mappings().one()
     s = r["summary"] or {}
-    _echo({"run_id": run_id, "status": r["status"], "data": s.get("data_label"), "fund": s.get("fund"), "tca": s.get("tca"),
-           "audit": s.get("audit"), "error": r["error"]})
+    _echo(
+        {
+            "run_id": run_id,
+            "status": r["status"],
+            "data": s.get("data_label"),
+            "fund": s.get("fund"),
+            "tca": s.get("tca"),
+            "audit": s.get("audit"),
+            "error": r["error"],
+        }
+    )
 
 
 @app.command("replay")
@@ -214,8 +264,12 @@ def replay_cmd(run_id: str) -> None:
 
 
 @app.command("study")
-def study_cmd(kind: str = typer.Argument(..., help="counterfactual_chain | dividend_rule | exclusions | cost_params | flow_regime"),
-              preset: str = "index_t1_flows") -> None:
+def study_cmd(
+    kind: str = typer.Argument(
+        ..., help="counterfactual_chain | dividend_rule | exclusions | cost_params | flow_regime"
+    ),
+    preset: str = "index_t1_flows",
+) -> None:
     """Submit a counterfactual chain or sensitivity study (runs go to the worker queue)."""
     from simp.config.run_config import preset as mk
     from simp.runs.orchestrator import submit_study
@@ -233,11 +287,25 @@ def lab_t3(run_id: str, top: int = 50) -> None:
     from simp.db.session import get_engine
 
     with get_engine().connect() as c:
-        rows = c.execute(text("select pm_order_id, date, permno, side, filled_qty, exec_notional from tca_order where run_id=:r "
-                              "order by exec_notional desc limit :n"), {"r": run_id, "n": top}).mappings().all()
-    spec = {"kind": "t3_simulation", "run_id": run_id, "models": ["AlmgrenChrissModel", "KylesLambdaModel"],
-            "exchange": "PriceTimeExchange", "actors": ["HistoricalActor", "HistoricalAuctionActor"],
-            "orders": [dict(r) for r in rows]}
+        rows = (
+            c.execute(
+                text(
+                    "select pm_order_id, date, permno, side, filled_qty, exec_notional from tca_order where run_id=:r "
+                    "order by exec_notional desc limit :n"
+                ),
+                {"r": run_id, "n": top},
+            )
+            .mappings()
+            .all()
+        )
+    spec = {
+        "kind": "t3_simulation",
+        "run_id": run_id,
+        "models": ["AlmgrenChrissModel", "KylesLambdaModel"],
+        "exchange": "PriceTimeExchange",
+        "actors": ["HistoricalActor", "HistoricalAuctionActor"],
+        "orders": [dict(r) for r in rows],
+    }
     p = Path(f"t3_job_{run_id}.json")
     p.write_text(json.dumps(spec, indent=1, default=str))
     typer.echo(f"wrote {p}: submit inside the Data Lab with bmll.compute.create_job")

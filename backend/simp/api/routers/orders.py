@@ -27,15 +27,32 @@ def _num(v: Any) -> Any:
 
 
 def _clean(r: dict[str, Any]) -> dict[str, Any]:
-    return {k: (_num(v) if not isinstance(v, str | bool | dict | list | date) and v is not None else v) for k, v in r.items()}
+    return {
+        k: (_num(v) if not isinstance(v, str | bool | dict | list | date) and v is not None else v)
+        for k, v in r.items()
+    }
 
 
 @router.get("/runs/{run_id}/orders", response_model=Page)
-def orders(run_id: str, level: str = Query("pm", pattern="^(pm|trader|child|fill)$"), on: date | None = Query(None, alias="date"),
-           permno: int | None = None, reason: str | None = None, strategy: str | None = None, broker: str | None = None,
-           venue: str | None = None, size_bucket: str | None = None, side: str | None = None, pm_order_id: str | None = None,
-           trader_order_id: str | None = None, sort: str = "exec_notional", desc: bool = True, limit: int = Query(100, le=5000),
-           offset: int = 0, _: User = Depends(current_user)) -> dict[str, Any]:
+def orders(
+    run_id: str,
+    level: str = Query("pm", pattern="^(pm|trader|child|fill)$"),
+    on: date | None = Query(None, alias="date"),
+    permno: int | None = None,
+    reason: str | None = None,
+    strategy: str | None = None,
+    broker: str | None = None,
+    venue: str | None = None,
+    size_bucket: str | None = None,
+    side: str | None = None,
+    pm_order_id: str | None = None,
+    trader_order_id: str | None = None,
+    sort: str = "exec_notional",
+    desc: bool = True,
+    limit: int = Query(100, le=5000),
+    offset: int = 0,
+    _: User = Depends(current_user),
+) -> dict[str, Any]:
     p: dict[str, Any] = {"r": run_id, "l": limit, "o": offset}
     w = ["p.run_id=:r"]
     if on:
@@ -77,7 +94,9 @@ def orders(run_id: str, level: str = Query("pm", pattern="^(pm|trader|child|fill
             "t.notional, t.exec_notional, t.avg_price, t.arrival_price, t.close_price, t.pct_adv, t.pct_auction, t.size_bucket, "
             "t.exec_cost_bps, t.is_bps, t.delay_bps, t.slip_benchmark_bps, t.main_strategy, t.main_broker, t.main_venue, "
             f"(select count(*) from trader_order x where x.pm_order_id=p.pm_order_id) n_trader {base} "  # noqa: S608
-            f"order by {s} {'desc' if desc else 'asc'} nulls last limit :l offset :o", **p)
+            f"order by {s} {'desc' if desc else 'asc'} nulls last limit :l offset :o",
+            **p,
+        )
         return {"total": int(total), "limit": limit, "offset": offset, "rows": [_clean(r) for r in data]}
     if level == "trader":
         if strategy:
@@ -99,12 +118,20 @@ def orders(run_id: str, level: str = Query("pm", pattern="^(pm|trader|child|fill
             "t.vwap_interval / p.quantity_adjustment_factor as vwap_interval, "
             "(select count(*) from child_order c where c.trader_order_id=x.trader_order_id) n_child "
             f"{base.replace('where', 'left join lateral (select sum(price*quantity)/nullif(sum(quantity),0) avg_price, sum(price*quantity) notional from fill ff where ff.trader_order_id=x.trader_order_id) f on true where', 1)} "
-            "order by f.notional desc nulls last limit :l offset :o", **p)  # noqa: S608
+            "order by f.notional desc nulls last limit :l offset :o",
+            **p,
+        )  # noqa: S608
         for r in data:
             s_ = 1 if r["side"] == "BUY" else -1
             ap, avg = _num(r["arrival_price"]), _num(r["avg_price"])
-            bench = {"MOC": "close_price", "LOC": "close_price", "PORTFOLIO_TRADE": "close_price", "INTERNAL_CROSS": "close_price",
-                     "ALGO_IS": "arrival_price", "HIGH_TOUCH": "arrival_price"}.get(r["strategy"], "vwap_interval")
+            bench = {
+                "MOC": "close_price",
+                "LOC": "close_price",
+                "PORTFOLIO_TRADE": "close_price",
+                "INTERNAL_CROSS": "close_price",
+                "ALGO_IS": "arrival_price",
+                "HIGH_TOUCH": "arrival_price",
+            }.get(r["strategy"], "vwap_interval")
             b = _num(r[bench])
             r["benchmark"] = bench.replace("_price", "").replace("_interval", "")
             r["slip_benchmark_bps"] = s_ * (avg - b) / b * 1e4 if avg and b else None
@@ -118,12 +145,17 @@ def orders(run_id: str, level: str = Query("pm", pattern="^(pm|trader|child|fill
             w.append("c.venue_mic=:vn")
             p["vn"] = venue
         where = " and ".join(w)
-        base = (f"from child_order c join trader_order x on x.trader_order_id=c.trader_order_id join pm_order p on "
-                f"p.pm_order_id=x.pm_order_id left join tca_order t on t.pm_order_id=p.pm_order_id where {where}")
+        base = (
+            f"from child_order c join trader_order x on x.trader_order_id=c.trader_order_id join pm_order p on "
+            f"p.pm_order_id=x.pm_order_id left join tca_order t on t.pm_order_id=p.pm_order_id where {where}"
+        )
         total = one(f"select count(*) n {base}", **p)["n"]  # type: ignore[index]  # noqa: S608
-        data = rows("select c.*, p.permno, p.side, t.ticker, x.strategy, "
-                    "(select sum(quantity) from fill f where f.child_order_id=c.child_order_id) filled_qty "
-                    f"{base} order by c.sent_ts limit :l offset :o", **p)  # noqa: S608
+        data = rows(
+            "select c.*, p.permno, p.side, t.ticker, x.strategy, "
+            "(select sum(quantity) from fill f where f.child_order_id=c.child_order_id) filled_qty "
+            f"{base} order by c.sent_ts limit :l offset :o",
+            **p,
+        )  # noqa: S608
         return {"total": int(total), "limit": limit, "offset": offset, "rows": [_clean(r) for r in data]}
     # fills
     if trader_order_id:
@@ -153,7 +185,11 @@ def lineage(pm_order_id: str, _: User = Depends(current_user)) -> dict[str, Any]
     rep = one("select * from reprice where pm_order_id=:p", p=pm_order_id)
     traders = rows("select * from trader_order where pm_order_id=:p order by start_ts", p=pm_order_id)
     tids = [t["trader_order_id"] for t in traders]
-    children = rows("select * from child_order where trader_order_id = any(:t) order by sent_ts", t=tids) if tids else []
+    children = (
+        rows("select * from child_order where trader_order_id = any(:t) order by sent_ts", t=tids)
+        if tids
+        else []
+    )
     fills = rows("select * from fill where pm_order_id=:p order by exec_ts", p=pm_order_id)
     prog = None
     pids = [t["program_id"] for t in traders if t["program_id"]]
@@ -163,20 +199,55 @@ def lineage(pm_order_id: str, _: User = Depends(current_user)) -> dict[str, Any]
         t["children"] = [c for c in children if c["trader_order_id"] == t["trader_order_id"]]
         for c in t["children"]:
             c["fills"] = [f for f in fills if f["child_order_id"] == c["child_order_id"]]
-    timeline = [{"ts": pm["decision_ts"], "kind": "decision", "label": f"{dec['decision_type'] if dec else ''} decision",
-                 "price": pm["decision_price"]}]
+    timeline = [
+        {
+            "ts": pm["decision_ts"],
+            "kind": "decision",
+            "label": f"{dec['decision_type'] if dec else ''} decision",
+            "price": pm["decision_price"],
+        }
+    ]
     for t in traders:
-        timeline.append({"ts": t["start_ts"], "kind": "trader", "label": f"{t['strategy']} via {t['broker_id']}", "price": t["arrival_price"],
-                         "quantity": t["quantity"]})
+        timeline.append(
+            {
+                "ts": t["start_ts"],
+                "kind": "trader",
+                "label": f"{t['strategy']} via {t['broker_id']}",
+                "price": t["arrival_price"],
+                "quantity": t["quantity"],
+            }
+        )
     for f in fills[:200]:
-        timeline.append({"ts": f["exec_ts"], "kind": "fill", "label": f"{f['venue_mic']} {f['liquidity']}", "price": f["price"],
-                         "quantity": f["quantity"]})
-    timeline.append({"ts": pm["deadline_ts"], "kind": "close", "label": "deadline (close)", "price": tca["close_price"] if tca else None})
+        timeline.append(
+            {
+                "ts": f["exec_ts"],
+                "kind": "fill",
+                "label": f"{f['venue_mic']} {f['liquidity']}",
+                "price": f["price"],
+                "quantity": f["quantity"],
+            }
+        )
+    timeline.append(
+        {
+            "ts": pm["deadline_ts"],
+            "kind": "close",
+            "label": "deadline (close)",
+            "price": tca["close_price"] if tca else None,
+        }
+    )
     timeline.sort(key=lambda x: x["ts"])
     chart = _intraday(pm, tca)
-    return {"pm_order": _clean(pm), "decision": dec, "tca": _clean(tca) if tca else None, "reprice": _clean(rep) if rep else None,
-            "program": prog, "trader_orders": [_clean(t) for t in traders], "fills": [_clean(f) for f in fills],
-            "timeline": timeline, "chart": chart}
+    return {
+        "pm_order": _clean(pm),
+        "decision": dec,
+        "tca": _clean(tca) if tca else None,
+        "reprice": _clean(rep) if rep else None,
+        "program": prog,
+        "trader_orders": [_clean(t) for t in traders],
+        "fills": [_clean(f) for f in fills],
+        "timeline": timeline,
+        "chart": chart,
+    }
 
 
 def _intraday(pm: dict[str, Any], tca: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -194,7 +265,13 @@ def _intraday(pm: dict[str, Any], tca: dict[str, Any] | None) -> dict[str, Any] 
     p = intra.paths(i)
     f = float(pm["quantity_adjustment_factor"] or 1.0)
     series = [[k, float(p[j, k])] for k in range(0, 390, 2)] if p is not None else []
-    return {"minutes": series, "basis": "execution-date shares", "open": float(md.opn[i, j]), "close": float(md.prc[i, j]),
-            "vwap": float(md.vwap[i, j]), "decision_price_exec_basis": float(pm["decision_price"]) / f,
-            "arrival_price": float(tca["arrival_price"]) / f if tca and tca.get("arrival_price") else None,
-            "synthetic_intraday": intra.synthetic}
+    return {
+        "minutes": series,
+        "basis": "execution-date shares",
+        "open": float(md.opn[i, j]),
+        "close": float(md.prc[i, j]),
+        "vwap": float(md.vwap[i, j]),
+        "decision_price_exec_basis": float(pm["decision_price"]) / f,
+        "arrival_price": float(tca["arrival_price"]) / f if tca and tca.get("arrival_price") else None,
+        "synthetic_intraday": intra.synthetic,
+    }

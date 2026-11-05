@@ -48,8 +48,8 @@ class Leg(BaseModel):
         if self.brokers and abs(sum(self.brokers.values()) - 1) > 1e-9:
             raise ValueError("broker weights must sum to 1")
         if self.window:
-            a, b = (time.fromisoformat(x) for x in self.window)
-            if not (time(9, 30) <= a < b <= time(16, 0)):
+            t0, t1 = (time.fromisoformat(x) for x in self.window)
+            if not (time(9, 30) <= t0 < t1 <= time(16, 0)):
                 raise ValueError(f"window {self.window} must lie inside 09:30-16:00 and start before it ends")
         return self
 
@@ -132,7 +132,9 @@ def _matches(w: When, o: OrderContext) -> bool:
         return False
     if w.basket and o.basket_key is None:
         return False
-    if w.max_pct_expected_auction is not None and (o.expected_auction <= 0 or o.quantity > w.max_pct_expected_auction * o.expected_auction):
+    if w.max_pct_expected_auction is not None and (
+        o.expected_auction <= 0 or o.quantity > w.max_pct_expected_auction * o.expected_auction
+    ):
         return False
     if w.max_pct_adv is not None and (not o.adv20 or o.quantity > w.max_pct_adv * o.adv20):
         return False
@@ -166,13 +168,23 @@ def plan_order(policy: DeskPolicy, o: OrderContext, rng: np.random.Generator) ->
                 q = min(left, math.floor(leg.pct_expected_auction * max(o.expected_auction, 0.0)))
             if q <= 0:
                 continue
-            legs.append(LegPlan(str(leg.strategy), broker, q, _window(leg, leg.strategy), dict(leg.params),
-                                o.basket_key if leg.strategy == Strategy.PORTFOLIO_TRADE else None))
+            legs.append(
+                LegPlan(
+                    str(leg.strategy),
+                    broker,
+                    q,
+                    _window(leg, leg.strategy),
+                    dict(leg.params),
+                    o.basket_key if leg.strategy == Strategy.PORTFOLIO_TRADE else None,
+                )
+            )
             left -= q
         rem = next((leg for leg in rule.then if leg.remainder), None)
         if rem is not None and left > 0:
             broker = str(rem.broker) if rem.broker else sorted(rem.brokers or {})[0]
-            legs.append(LegPlan(str(rem.strategy), broker, left, _window(rem, rem.strategy), dict(rem.params)))
+            legs.append(
+                LegPlan(str(rem.strategy), broker, left, _window(rem, rem.strategy), dict(rem.params))
+            )
         return rule.name, legs
     raise AssertionError("unreachable: policy validation guarantees a catch-all rule")
 
@@ -186,8 +198,15 @@ def apply_spill_cap(policy: DeskPolicy, legs: list[LegPlan], expected_auction: f
         if leg.strategy == Strategy.MOC and leg.quantity > cap:
             if cap > 0:
                 out.append(LegPlan(leg.strategy, leg.broker_id, cap, leg.window, dict(leg.params)))
-            out.append(LegPlan(str(Strategy.ALGO_VWAP), "BRK_A", leg.quantity - max(cap, 0), (time(13, 0), time(15, 50)),
-                               {"spill_from": "MOC", "reason": "above auction cap"}))
+            out.append(
+                LegPlan(
+                    str(Strategy.ALGO_VWAP),
+                    "BRK_A",
+                    leg.quantity - max(cap, 0),
+                    (time(13, 0), time(15, 50)),
+                    {"spill_from": "MOC", "reason": "above auction cap"},
+                )
+            )
         else:
             out.append(leg)
     return out
