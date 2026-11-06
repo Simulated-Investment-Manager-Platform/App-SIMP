@@ -101,14 +101,14 @@ def check(cfg: dict[str, Any], _: User = Depends(current_user)) -> dict[str, Any
             "T3 runs inside the BMLL Data Lab only (bmll2.simulation)",
             "Use `simp lab t3-job`",
         )
-    elif (
-        c.execution_model == "T2" and label != "SYNTHETIC" and not lake.partition_dates("bmll", "trades_plus")
-    ):
+    elif c.execution_model == "T2" and label != "SYNTHETIC":
+        # Live tick replay is not wired yet: IntradayService has no Trades Plus reader, so T2
+        # would silently price off daily VWAP. Refuse rather than mislabel fills as T2.
         add(
             "execution model",
             False,
-            "T2 needs BMLL Trades Plus @SIP partitions",
-            "Pull Trades Plus via a Data Lab job",
+            "T2 tick replay is not available on live data yet (needs a BMLL Trades Plus @SIP loader)",
+            "Use T1 on live data; T2 runs on the synthetic snapshot",
         )
     else:
         add("execution model", True, f"{c.execution_model} available on {label} data")
