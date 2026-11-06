@@ -107,3 +107,13 @@ def test_merger_cannot_be_approved(client) -> None:  # type: ignore[no-untyped-d
         f"/api/data/corporate-actions/{x['permno']}/{x['ex_date']}/MG", json={"status": "APPROVED"}
     )
     assert r.status_code == 422
+
+
+def test_export_t2_needs(run_id) -> None:  # type: ignore[no-untyped-def]
+    """The (date, ticker) list for the puller's Trades Plus stage comes from a run's algo orders."""
+    from simp.cli.main import t2_needs
+
+    df = t2_needs(run_id)
+    assert set(df.columns) == {"date", "permno", "listing_id", "sip_listing_id", "ticker"}
+    assert df.height > 0 and df.drop_nulls("ticker").height > 0
+    assert df.select("date", "permno").is_unique().all()

@@ -142,7 +142,8 @@ def pull_live(lake: Lake, start: date, end: date, *, reuse_crsp: bool = False) -
         imb = pl.DataFrame(schema=dict(c.columns))
     raw[("bmll", "auction_imbalance")] = imb
     build_derived(lake, raw, "CRSP+BMLL", {"start": str(start), "end": str(end)})
+    optional = [("vendor", "sp500_tr"), ("bmll", "trades_plus_minute")]  # T2 needs the latter
     return lake.create_snapshot(
-        [d for d in SNAPSHOT_DATASETS if d != ("vendor", "sp500_tr")]
-        + ([("vendor", "sp500_tr")] if lake.latest_manifest("vendor", "sp500_tr") else [])
+        [d for d in SNAPSHOT_DATASETS if d not in optional]
+        + [d for d in optional if lake.latest_manifest(*d)]
     )

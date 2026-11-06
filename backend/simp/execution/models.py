@@ -83,10 +83,12 @@ class Executor:
                 "AlmgrenChrissModel/KylesLambdaModel) inside the BMLL Data Lab only. Submit it with "
                 "`simp lab t3-job --run <run_id>`; results are imported as fills with fill_model=T3."
             )
-        if model == ExecutionModel.T2 and not intraday.synthetic:
+        if model == ExecutionModel.T2 and not intraday.synthetic and not intraday.live:
             raise ExecutionModelUnavailable(
-                "T2 tick replay needs BMLL Trades Plus @SIP partitions in the lake (lake/bmll/trades_plus); "
-                "pull them with a Data Lab job for the dates in this run."
+                "T2 tick replay on live data needs BMLL Trades Plus minute bars in the snapshot: run a T1 "
+                "backtest, `simp data export-t2-needs <run>`, the puller with --t2-needs, "
+                "`simp data register-bmll DIR --only trades_plus_minute`, then `simp data pull --source live "
+                "--reuse-crsp` to rebuild the snapshot."
             )
 
     # ------------------------------------------------------------------ helpers
@@ -407,14 +409,19 @@ class Executor:
         cont = max(float(np.nan_to_num(md.volume[i, j])) - float(md.auc_vol[i, j]), 0.0)
         a = int(max(0, minutes_from_open(self.intra.local(o.start_ts).time())))
         b = int(min(390, math.ceil(minutes_from_open(self.intra.local(o.end_ts).time()))))
-        w = curve[a:b] / curve[a:b].sum()
+        # interval volume: real Trades Plus minute volume when the snapshot has it, else the
+        # volume curve x the day's continuous volume (flagged on live data)
+        real = self.intra.minute_volume(i, j)
+        flags = [] if real is not None or self.intra.synthetic else ["INTRADAY_FALLBACK_DAILY"]
+        ivol = real if real is not None and real[a:b].sum() > 0 else cont * curve
+        w = ivol[a:b] / ivol[a:b].sum() if ivol[a:b].sum() > 0 else curve[a:b] / curve[a:b].sum()
         target = np.cumsum(o.quantity * w)
         done = 0.0
         children: list[ChildOrder] = []
         fills: list[Fill] = []
         bucket: ChildOrder | None = None
         for k, m in enumerate(range(a, b)):
-            cap = math.floor(self.cost.t2_interval_cap * cont * curve[m])
+            cap = math.floor(self.cost.t2_interval_cap * ivol[m])
             want = math.floor(target[k] - done)
             q = float(min(max(want, 0), cap, o.quantity - done))
             if (m - a) % 5 == 0 or bucket is None:
@@ -452,7 +459,7 @@ class Executor:
                     str(liq),
                     str(MarketState.CONTINUOUS_TRADING),
                     "T2_REPLAY",
-                    {**ref, "interval_volume": cont * curve[m], "cap": cap},
+                    {**ref, "interval_volume": float(ivol[m]), "cap": cap, "flags": flags},
                 )
             )
             done += q

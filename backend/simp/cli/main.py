@@ -94,14 +94,27 @@ def data_pull(
 
 
 @data_app.command("register-bmll")
-def register_bmll(directory: Path) -> None:
+def register_bmll(
+    directory: Path,
+    only: list[str] = typer.Option(
+        None, "--only", help="register just these datasets, e.g. trades_plus_minute"
+    ),
+) -> None:
     """Register Parquet written by the isolated BMLL puller (contracts checked, manifests written)."""
     import polars as pl
 
     from simp.data.lake.store import Lake
 
     lake = Lake()
-    for ds in ("reference_listing", "daily_analytics", "classified_trades", "auction_imbalance"):
+    for ds in (
+        "reference_listing",
+        "daily_analytics",
+        "classified_trades",
+        "auction_imbalance",
+        "trades_plus_minute",
+    ):
+        if only and ds not in only:
+            continue
         p = directory / f"{ds}.parquet"
         if not p.exists():
             typer.echo(f"skip {ds}: {p} not found")
@@ -120,6 +133,75 @@ def register_bmll(directory: Path) -> None:
             data_label="BMLL",
         )
         typer.echo(f"{ds}: {m.row_count} rows, manifest {m.content_hash()[:12]}")
+
+
+T2_INTRADAY_STRATEGIES = ("HIGH_TOUCH", "ALGO_VWAP", "ALGO_TWAP", "ALGO_POV", "ALGO_IS")
+
+
+def t2_needs(run_id: str) -> Any:
+    """(date, permno) of a run's intraday orders, with the BMLL @SIP ticker to query Trades Plus by."""
+    import polars as pl
+    from sqlalchemy import text
+
+    from simp.accounting.calendar import NY
+    from simp.data.lake.store import Lake
+    from simp.data.pull import _latest
+    from simp.db.session import get_engine
+
+    with get_engine().connect() as c:
+        rows = c.execute(
+            text(
+                "select distinct p.permno, t.start_ts from trader_order t join pm_order p "
+                "on p.pm_order_id = t.pm_order_id where t.run_id = :r and t.strategy = any(:s)"
+            ),
+            {"r": run_id, "s": list(T2_INTRADAY_STRATEGIES)},
+        ).all()
+    if not rows:
+        raise typer.BadParameter(f"run {run_id} has no intraday (algo / high-touch) orders")
+    needs = pl.DataFrame(
+        {"permno": [int(p) for p, _ in rows], "date": [ts.astimezone(NY).date() for _, ts in rows]}
+    ).unique()
+    lake = Lake()
+    smap, ref = _latest(lake, "derived", "security_map"), _latest(lake, "bmll", "reference_listing")
+    if smap is None or ref is None:
+        raise typer.BadParameter("no live snapshot in the lake: run `simp data pull --source live` first")
+    j = needs.join(
+        smap.select("permno", "listing_id", "sip_listing_id", "valid_from", "valid_to"), on="permno"
+    )
+    j = j.filter((pl.col("date") >= pl.col("valid_from")) & (pl.col("date") <= pl.col("valid_to")))
+    sip = ref.filter(pl.col("MIC") == "@SIP").select(
+        pl.col("ListingId").cast(pl.Int64).alias("sip_listing_id"),
+        pl.col("Ticker").alias("ticker"),
+        pl.col("ValidFrom").alias("tf"),
+        pl.col("ValidTo").alias("tt"),
+    )
+    j = j.join(sip, on="sip_listing_id", how="left").filter(
+        pl.col("ticker").is_null() | ((pl.col("date") >= pl.col("tf")) & (pl.col("date") <= pl.col("tt")))
+    )
+    return (
+        j.select("date", "permno", "listing_id", "sip_listing_id", "ticker")
+        .unique(["date", "permno"], keep="first")
+        .sort("date", "ticker")
+    )
+
+
+@data_app.command("export-t2-needs")
+def export_t2_needs(run: str, out: Path = typer.Option(Path("t2_needs.csv"))) -> None:
+    """Write the (date, ticker) pairs a run's intraday orders traded, for the BMLL puller's
+    Trades Plus stage (`puller.py --t2-needs`). Run a T1 backtest first, then export from it."""
+    import polars as pl
+
+    df = t2_needs(run)
+    missing = df.filter(pl.col("ticker").is_null() | pl.col("sip_listing_id").is_null())
+    df.drop_nulls(["ticker", "sip_listing_id"]).write_csv(out)
+    typer.echo(
+        f"wrote {out}: {df.height - missing.height} (date, ticker) pairs over {df['date'].n_unique()} sessions"
+        + (
+            f"; {missing.height} without an @SIP listing (T2 falls back to daily for them)"
+            if missing.height
+            else ""
+        )
+    )
 
 
 @data_app.command("export-isins")

@@ -102,14 +102,23 @@ def check(cfg: dict[str, Any], _: User = Depends(current_user)) -> dict[str, Any
             "Use `simp lab t3-job`",
         )
     elif c.execution_model == "T2" and label != "SYNTHETIC":
-        # Live tick replay is not wired yet: IntradayService has no Trades Plus reader, so T2
-        # would silently price off daily VWAP. Refuse rather than mislabel fills as T2.
-        add(
-            "execution model",
-            False,
-            "T2 tick replay is not available on live data yet (needs a BMLL Trades Plus @SIP loader)",
-            "Use T1 on live data; T2 runs on the synthetic snapshot",
-        )
+        has = "bmll/trades_plus_minute" in lake.snapshot(snap)["manifests"]
+        if has:
+            n_bar = len(lake.manifest_for(snap, "bmll", "trades_plus_minute")["files"])
+            add(
+                "execution model",
+                True,
+                f"T2 replays BMLL Trades Plus minute bars ({n_bar} sessions); orders "
+                "without bars fall back to daily figures, flagged INTRADAY_FALLBACK_DAILY",
+            )
+        else:
+            add(
+                "execution model",
+                False,
+                "T2 needs BMLL Trades Plus minute bars in the snapshot",
+                "Run T1 first, then: simp data export-t2-needs <run> -> puller.py --t2-needs -> "
+                "simp data register-bmll DIR --only trades_plus_minute -> simp data pull --source live --reuse-crsp",
+            )
     else:
         add("execution model", True, f"{c.execution_model} available on {label} data")
     md_dates = lake.partition_dates("derived", "market_daily")

@@ -12,14 +12,20 @@ conforms types, checks the contracts and writes manifests. If the SDK returns a 
 name this script does not know, registration fails naming the missing column; add it to RENAME.
 
 The Auction Imbalance detail dataset (``auction_imbalance.parquet``: ImbalanceSide,
-ImbalanceQuantity, PairedQuantity, ReferencePrice, IndicativeUncrossingPrice) and Trades Plus
-@SIP come from Data Lab jobs (``bmll2``); ``lab_job_spec`` builds those specs. Without the
-imbalance file SIMP still runs and reports imbalance as zero.
+ImbalanceQuantity, PairedQuantity, ReferencePrice, IndicativeUncrossingPrice) comes from a Data
+Lab job (``bmll2``); without it SIMP still runs and reports imbalance as zero.
+
+T2 stage (``--t2-needs t2_needs.csv`` from ``simp data export-t2-needs <run>``): Trades Plus @SIP
+ticks for only the (date, ticker) pairs a run traded intraday, queried by Ticker (a ListingId
+filter on @SIP is refused by BMLL entitlements) and collapsed to 1-minute regular-session bars
+(NBBO mid, continuous VWAP, addressable volume) in ``trades_plus_minute.parquet``.
 
 Usage::
 
     uv run --project connectors/bmll_puller python connectors/bmll_puller/puller.py \\
         --isins isins.csv --start 2022-03-01 --end 2026-07-31 --out lake_staging/bmll
+    uv run --project connectors/bmll_puller python connectors/bmll_puller/puller.py \\
+        --t2-needs t2_needs.csv --out lake_staging/bmll
 
 Credentials (environment): BMLL_KEY_PATH (private key; <key>.pub next to it), BMLL_USERNAME
 (your BMLL API username), optional BMLL_KEY_PASSPHRASE and BMLL_LAB_ORG_ID. Test with --check-auth.
@@ -381,17 +387,101 @@ def classified_trades(listing_ids: list[int], start: date, end: date, dest: Path
     return rows, sorted(labels)
 
 
-def estimate_trades_plus(sip_listing_ids: list[int], day: date) -> object:
+# ------------------------------------------------------------------ T2: Trades Plus minute bars
+TP_COLS = ["ListingId", "Ticker", "TradeTimestamp", "Price", "Size", "Classification", "BestBidPrice", "BestAskPrice"]
+TP_BATCH = 10  # tickers per query (~300k prints per large-cap name per day)
+OPEN_MIN, N_MIN = 9 * 60 + 30, 390
+
+
+def minute_bars(ticks: pd.DataFrame) -> pd.DataFrame:
+    """Trades Plus prints for one date -> one row per (ListingId, regular-session minute 0..389).
+
+    Mid is the last valid NBBO mid quoted before a print in that minute; VWAP and Volume count
+    lit-continuous and dark prints only (auction, pre/post-session and off-book prints are not
+    addressable by an intraday algo). Cancellations (negative Size) are dropped."""
+    t = ticks[ticks["Size"] > 0].copy()
+    ts = pd.to_datetime(t["TradeTimestamp"])
+    ts = ts.dt.tz_localize("UTC") if ts.dt.tz is None else ts.dt.tz_convert("UTC")
+    loc = ts.dt.tz_convert("America/New_York")
+    t["Minute"] = loc.dt.hour * 60 + loc.dt.minute - OPEN_MIN
+    t = t[(t["Minute"] >= 0) & (t["Minute"] < N_MIN)]
+    t["Date"] = loc[t.index].dt.date
+    cls = t["Classification"].astype("string").str.upper().fillna("")
+    cont = (cls == "LIT_CONTINUOUS") | cls.str.startswith("DARK")
+    bid, ask = t["BestBidPrice"].astype(float), t["BestAskPrice"].astype(float)
+    t["mid"] = ((bid + ask) / 2).where((bid > 0) & (ask >= bid))
+    t["ts"] = ts[t.index]
+    keys = ["ListingId", "Date", "Minute"]
+    mid = t.dropna(subset=["mid"]).sort_values("ts").groupby(keys)["mid"].last().rename("Mid")
+    c = t[cont]
+    c = c.assign(px_sz=c["Price"].astype(float) * c["Size"].astype(float))
+    g = c.groupby(keys).agg(Volume=("Size", "sum"), Notional=("px_sz", "sum"), Trades=("Size", "size"))
+    g["Vwap"] = g["Notional"] / g["Volume"]
+    out = pd.concat([mid, g[["Vwap", "Volume", "Trades"]]], axis=1).reset_index()
+    out["Volume"] = out["Volume"].fillna(0.0).astype(float)
+    out["Trades"] = out["Trades"].fillna(0).astype("int64")
+    out["Minute"] = out["Minute"].astype("int16")
+    return out[["ListingId", "Date", "Minute", "Mid", "Vwap", "Volume", "Trades"]]
+
+
+def _tp_query(day: date, tickers: list[str]) -> pd.DataFrame:
+    import bmll
+
+    kw = dict(start_date=day, end_date=day, MIC="@SIP", Ticker=tickers)
+    try:
+        df = bmll.data.query("trades_plus", columns=TP_COLS, **kw)
+    except TypeError:  # older SDK without columns=
+        df = bmll.data.query("trades_plus", **kw)[TP_COLS]
+    return df.to_pandas() if hasattr(df, "to_pandas") else df
+
+
+def trades_plus_minute(needs: pd.DataFrame, dest: Path) -> int:
+    """Pull and aggregate Trades Plus for every (date, ticker) in ``needs`` (columns date, permno,
+    listing_id, sip_listing_id, ticker). One chunk per (date, ticker batch), so a restart resumes."""
+    import hashlib
+    import time
+
+    assert CHUNKS is not None
+    needs = needs.assign(date=pd.to_datetime(needs["date"]).dt.date)
+    jobs = []
+    for day, part in sorted(needs.groupby("date"), key=lambda x: x[0]):
+        tick = sorted(part["ticker"].astype(str).unique())
+        for k in range(0, len(tick), TP_BATCH):
+            jobs.append((day, tick[k : k + TP_BATCH], part))
+    print(f"  {len(jobs)} queries over {needs['date'].nunique()} sessions, {len(needs)} (date, ticker) pairs", flush=True)
+    t0, done = time.time(), 0
+    for n, (day, batch, part) in enumerate(jobs, 1):
+        h = hashlib.md5(f"{day}|{','.join(batch)}".encode()).hexdigest()[:12]
+        f = CHUNKS / f"tpm_{day}_{h}.parquet"
+        if f.exists():
+            continue
+        ticks = _tp_query(day, batch)
+        want = part[part["ticker"].astype(str).isin(batch)]
+        sip_to = {int(r.sip_listing_id): (int(r.permno), int(r.listing_id)) for r in want.itertuples()}
+        ticks = ticks[ticks["ListingId"].astype("int64").isin(list(sip_to))]  # drop ticker reuse
+        bars = minute_bars(ticks) if len(ticks) else pd.DataFrame(columns=["ListingId", "Date", "Minute", "Mid", "Vwap", "Volume", "Trades"])
+        sip_ids = bars["ListingId"].astype("int64")
+        bars["permno"] = sip_ids.map({k: v[0] for k, v in sip_to.items()}).astype("int64")
+        bars["ListingId"] = sip_ids.map({k: v[1] for k, v in sip_to.items()}).astype("int64")  # -> primary
+        bars.to_parquet(f, index=False)
+        done += 1
+        el = time.time() - t0
+        eta = el / done * (len(jobs) - n)
+        print(f"  [{n}/{len(jobs)}] {day} {len(batch)} tickers: {len(ticks):,} prints -> {len(bars):,} bars "
+              f"({el:,.0f}s, ETA ~{eta / 60:,.0f} min)", flush=True)
+    # cumulative: every bar chunk pulled so far (earlier runs' needs too), so the registered
+    # dataset never loses dates when needs are exported from another run
+    parts = [p for f in sorted(CHUNKS.glob("tpm_*.parquet")) if len(p := pd.read_parquet(f))]
+    out = pd.concat(parts, ignore_index=True).drop_duplicates(["permno", "Date", "Minute"]) if parts else pd.DataFrame()
+    out.to_parquet(dest, index=False)
+    return len(out)
+
+
+def estimate_trades_plus(tickers: list[str], day: date) -> object:
     """Size a Trades Plus @SIP pull before running it (bmll.data.query estimate=True)."""
     import bmll
 
-    return bmll.data.query(
-        "trades-plus",
-        start_date=day,
-        end_date=day,
-        ListingId=[str(x) for x in sip_listing_ids],
-        estimate=True,
-    )
+    return bmll.data.query("trades_plus", start_date=day, end_date=day, MIC="@SIP", Ticker=tickers, estimate=True)
 
 
 def lab_job_spec(kind: str, dates: list[date], listing_ids: list[int], storage_uri: str) -> dict[str, object]:
@@ -413,15 +503,26 @@ def main() -> None:
     ap.add_argument("--start")
     ap.add_argument("--end")
     ap.add_argument("--out")
+    ap.add_argument("--t2-needs", help="CSV from `simp data export-t2-needs <run>`: pull Trades Plus minute bars only")
     a = ap.parse_args()
     login()
     if a.check_auth:
+        return
+    global CHUNKS
+    if a.t2_needs:
+        if not a.out:
+            ap.error("--out is required")
+        out = Path(a.out)
+        CHUNKS = out / "_chunks"
+        CHUNKS.mkdir(parents=True, exist_ok=True)
+        print("T2: Trades Plus @SIP minute bars", flush=True)
+        n = trades_plus_minute(pd.read_csv(a.t2_needs), out / "trades_plus_minute.parquet")
+        print(f"trades_plus_minute: {n:,} bars written to {out / 'trades_plus_minute.parquet'}", flush=True)
         return
     if not (a.isins and a.start and a.end and a.out):
         ap.error("--isins, --start, --end and --out are required")
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    global CHUNKS
     CHUNKS = out / "_chunks"
     CHUNKS.mkdir(exist_ok=True)
     s, e = date.fromisoformat(a.start), date.fromisoformat(a.end)

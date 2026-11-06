@@ -170,7 +170,8 @@ drill to a fill).
 2. **BMLL.** In `backend/connectors/bmll_puller` (an isolated env, because `bmll` ≥ 1.25 pins
    NumPy < 2), run `uv run python puller.py --listings listings.csv --start … --end … --out
    ../../lake_staging/bmll` with `BMLL_KEY_PATH` set. Then run `uv run simp data register-bmll
-   lake_staging/bmll`. Trades Plus @SIP, auction imbalance detail and T3 run as Data Lab jobs.
+   lake_staging/bmll`. Auction imbalance detail and T3 run as Data Lab jobs; Trades Plus @SIP minute bars for T2
+   come from the puller's `--t2-needs` stage.
 3. `SIMP_DATA_SOURCE=live uv run simp data pull`, then re-run the presets. With the handoff CSVs in
    `backend/tests/golden/handoff/`, `pytest -m golden` checks the replay.
 

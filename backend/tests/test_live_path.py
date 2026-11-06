@@ -7,7 +7,9 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import numpy as np
 import polars as pl
+import pytest
 
 from simp.data.lake.contracts import CONTRACTS, check_contract, conform
 
@@ -222,3 +224,68 @@ def test_benchmark_reads_ciz_dsp500_v2_then_legacy() -> None:
     assert _benchmark_table(both) == "crsp_q_indexes.dsp500_v2"
     assert _benchmark_table({"crsp_q_indexes.dsp500": cols}) == "crsp_q_indexes.dsp500"
     assert _benchmark_table({"crsp.dsp500": cols}) == "crsp.dsp500"
+
+
+def test_live_t2_replays_trades_plus_minute_bars(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Live snapshot + Trades Plus minute bars: T2 caps each minute at 10% of the REAL minute
+    volume and prices off the bar mid; a session without bars falls back and is flagged."""
+    from datetime import time
+
+    from simp.accounting.calendar import ny_ts
+    from simp.config.run_config import CostModelParams
+    from simp.data.lake.store import Lake
+    from simp.data.market import load_market
+    from simp.data.pull import pull_live, write_raw
+    from simp.data.synthetic.generator import generate
+    from simp.domain.enums import ExecutionModel
+    from simp.domain.ids import IdFactory
+    from simp.domain.records import TraderOrder
+    from simp.execution.intraday import IntradayService
+    from simp.execution.models import Executor
+
+    w = generate(3, date(2025, 6, 2), date(2026, 3, 31))
+    lake = Lake(tmp_path)
+    write_raw(lake, {k: v for k, v in w.tables.items() if k[0] == "crsp"}, "CRSP", {}, "test")
+    bmll = {k: v for k, v in w.tables.items() if k[0] == "bmll" and k[1] != "auction_imbalance"}
+    write_raw(lake, bmll, "BMLL", {}, "test")
+    snap0 = pull_live(lake, date(2025, 6, 2), date(2026, 3, 31), reuse_crsp=True)
+    md0 = load_market(snap0, str(tmp_path))
+    i_bar, i_none = len(md0.sessions) - 20, len(md0.sessions) - 10
+    j = int(np.flatnonzero(md0.member[i_bar] & md0.member[i_none])[0])
+    permno, d = int(md0.permnos[j]), md0.sessions[i_bar]
+    bars = pl.DataFrame(
+        {
+            "ListingId": [int(md0.listing_id[j])] * 390,
+            "permno": [permno] * 390,
+            "Date": [d] * 390,
+            "Minute": list(range(390)),
+            "Mid": [100.0 + 0.01 * m for m in range(390)],
+            "Vwap": [100.0 + 0.01 * m for m in range(390)],
+            "Volume": [1000.0] * 390,
+            "Trades": [10] * 390,
+        }
+    )
+    lake.write(
+        "bmll", "trades_plus_minute", bars, date_col="Date", query_args={}, sdk_version="t", data_label="BMLL"
+    )
+    snap = pull_live(lake, date(2025, 6, 2), date(2026, 3, 31), reuse_crsp=True)
+    md = load_market(snap, str(tmp_path))
+    intra = IntradayService(md)
+    assert intra.live and not intra.synthetic and intra.has_bars(i_bar, j) and not intra.has_bars(i_none, j)
+    assert intra.price_at(i_bar, j, 100.5) == pytest.approx(100.0 + 0.01 * 100, abs=0.01)
+    ex = Executor(md, intra, ExecutionModel.T2, CostModelParams(), IdFactory("t2"), "run", 1)
+
+    def order(i: int) -> TraderOrder:
+        s = md.sessions[i]
+        return TraderOrder(
+            f"to{i}", f"pm{i}", "run", "DESK", "ALGO_VWAP", None, "BRK1", 1_000_000.0,
+            ny_ts(s, time(9, 30)), ny_ts(s, time(16, 0)), 100.0, {}, "WORKING", 1.0, permno, "BUY",
+        )  # fmt: skip
+
+    got = ex.execute(i_bar, [order(i_bar)]).fills
+    assert got and all(f.quantity <= 100 for f in got)  # 10% of 1,000 shares a minute
+    assert sum(f.quantity for f in got) <= 390 * 100
+    assert all(f.ref_snapshot["interval_volume"] == 1000.0 and not f.ref_snapshot["flags"] for f in got)
+    assert all(abs(f.price - 100.0) < 5 for f in got)
+    fb = ex.execute(i_none, [order(i_none)]).fills
+    assert fb and all(f.ref_snapshot["flags"] == ["INTRADAY_FALLBACK_DAILY"] for f in fb)

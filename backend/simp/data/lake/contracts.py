@@ -174,6 +174,22 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
         },
         ("ListingId", "Date", "ClassificationName", "ExecutionVenue"),
     ),
+    # T2 tick replay: Trades Plus @SIP collapsed to regular-session minutes (puller --t2-needs);
+    # ListingId is the primary listing, Minute 0 = 09:30-09:31 New York.
+    ("bmll", "trades_plus_minute"): Contract(
+        1,
+        {
+            "ListingId": I64,
+            "permno": I64,
+            "Date": DATE,
+            "Minute": I64,
+            "Mid": F64,
+            "Vwap": F64,
+            "Volume": F64,
+            "Trades": I64,
+        },
+        ("permno", "Date", "Minute"),
+    ),
     ("bmll", "auction_imbalance"): Contract(
         1,
         {

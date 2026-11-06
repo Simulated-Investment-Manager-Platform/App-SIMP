@@ -140,8 +140,24 @@ builds the spec; submit with `bmll.compute.create_job` inside the Lab):
 - **Auction Imbalance:** save it as `lake_staging/bmll/auction_imbalance.parquet` with columns
   `ListingId, Date, ImbalanceSide, ImbalanceQuantity, PairedQuantity, ReferencePrice, IndicativeUncrossingPrice`.
   Without it SIMP still runs, but closing imbalance is zero, so the auction-impact λ term never applies.
-- **Trades Plus `@SIP`:** needed for **T2** on live data. Size the pull first with
-  `estimate_trades_plus(...)` (`bmll.data.query(..., estimate=True)`).
+- **Trades Plus `@SIP` (T2 on live data):** pulled with the external SDK, no Lab job. T2 only replays
+  the stocks and days a run traded intraday, so the pull is driven by a T1 run:
+
+  ```bash
+  # backend/: list the (date, ticker) pairs a T1 run's algo orders traded
+  uv run simp data export-t2-needs RUN_ID --out ../lake_staging/t2_needs.csv
+  # backend/connectors/bmll_puller: ticks -> 1-minute bars (resumable; bars accumulate across runs)
+  uv run python puller.py --t2-needs ../../../lake_staging/t2_needs.csv --out ../../../lake_staging/bmll
+  # backend/: register only the bars, then rebuild the snapshot so it carries them
+  uv run simp data register-bmll ../lake_staging/bmll --only trades_plus_minute
+  uv run simp data pull --source live --reuse-crsp --start 2022-03-01 --end 2026-06-30
+  ```
+
+  Trades Plus is queried by `Ticker` with `MIC="@SIP"` (a `ListingId` filter on @SIP is refused by
+  BMLL entitlements). A large-cap name prints ~300k trades a day; the puller keeps 8 columns and
+  collapses them to 390 regular-session bars (NBBO mid, lit-continuous + dark VWAP and volume).
+  T2 then caps each minute at 10% of that real volume. Orders on days without bars fall back to
+  daily figures and are flagged `INTRADAY_FALLBACK_DAILY` in the fallback report.
 - **T3** (`bmll2.simulation`) only runs inside the Lab. `uv run simp lab t3-job RUN_ID` writes the order list for it.
 
 ## 6. Register the BMLL files
@@ -211,7 +227,7 @@ uv run simp study counterfactual_chain       # TD decomposition (worker queue)
 ```
 
 Or use **Runs → New run** in the UI. The review step's data-availability check confirms the snapshot,
-window, execution-model availability (T2 needs Trades Plus; T3 is Lab-only) and the mapping queue.
+window, execution-model availability (T2 needs Trades Plus minute bars in the snapshot; T3 is Lab-only) and the mapping queue.
 
 **Golden replay against the handoff:**
 
@@ -246,4 +262,4 @@ It checks that `portfolio_nav.csv` is reproduced within $0.01 per day over the 1
 | Run fails `CorporateActionError … unclassified distribution` | Add the CRSP `distype` code to `DISTYPE_MAP` |
 | Run fails `MissingPriceError` | A held name has no CRSP close that session; prices are never forward-filled. Check the pull window or the exclusion |
 | TCA marked *provisional* | Over 1% of notional used a BMLL fallback (auction price from CRSP, or auction volume from the 20-day median). Pull the missing BMLL days |
-| T2 option rejected | Trades Plus `@SIP` not in the lake |
+| T2 option rejected on live data | The snapshot has no `trades_plus_minute`: follow the Trades Plus steps in section 5, then rebuild the snapshot |

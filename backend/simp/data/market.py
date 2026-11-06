@@ -121,6 +121,9 @@ class MarketData:
     pos: dict[int, int] = field(default_factory=dict)
     # CRSP stkdelists: permno -> (delisting date, delisting return or None)
     delisted: dict[int, tuple[date, float | None]] = field(default_factory=dict)
+    # Live T2: Trades Plus minute bars per session index -> (mid, vwap, volume), each (N, 390);
+    # rows of names without bars that day are NaN mid / zero volume.
+    bars: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = field(default_factory=dict)
     _horizon: int | None = None
 
     @property
@@ -328,4 +331,43 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
         pos=pos,
         delisted=delisted,
         data_seed=data_seed,
+        bars=_load_bars(lake, snapshot, dpos, pos),
     )
+
+
+N_BAR_MINUTES = 390
+
+
+def _load_bars(
+    lake: Lake, snapshot: str, dpos: dict[date, int], pos: dict[int, int]
+) -> dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    if "bmll/trades_plus_minute" not in lake.snapshot(snapshot)["manifests"]:
+        return {}
+    df = lake.read(snapshot, "bmll", "trades_plus_minute").filter(
+        pl.col("Date").is_in(list(dpos)) & pl.col("permno").is_in(list(pos))
+    )
+    out: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    n = len(pos)
+    for (d,), part in df.group_by(["Date"]):
+        mid = np.full((n, N_BAR_MINUTES), np.nan)
+        vwap = np.full((n, N_BAR_MINUTES), np.nan)
+        vol = np.zeros((n, N_BAR_MINUTES))
+        j = np.array([pos[int(p)] for p in part["permno"].to_list()])
+        m = part["Minute"].to_numpy().astype(int)
+        ok = (m >= 0) & (m < N_BAR_MINUTES)
+        j, m = j[ok], m[ok]
+        mid[j, m] = part["Mid"].to_numpy().astype(float)[ok]
+        vwap[j, m] = part["Vwap"].to_numpy().astype(float)[ok]
+        vol[j, m] = np.nan_to_num(part["Volume"].to_numpy().astype(float)[ok])
+        for jj in np.unique(j):  # quotes carry forward through quiet minutes, then back-fill the open
+            row = mid[jj]
+            idx = np.where(np.isfinite(row), np.arange(N_BAR_MINUTES), 0)
+            np.maximum.accumulate(idx, out=idx)
+            filled = row[idx]
+            first = np.flatnonzero(np.isfinite(row))
+            if first.size:
+                filled[: first[0]] = row[first[0]]
+            mid[jj] = filled
+            vwap[jj] = np.where(np.isfinite(vwap[jj]), vwap[jj], mid[jj])
+        out[dpos[d]] = (mid, vwap, vol)
+    return out

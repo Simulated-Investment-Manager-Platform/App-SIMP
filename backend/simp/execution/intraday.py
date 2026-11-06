@@ -1,8 +1,9 @@
 """Intraday prices for one (security, session).
 
 Synthetic snapshots rebuild the generator's minute paths from stored lake columns + seed.
-Live snapshots use BMLL Trades Plus @SIP partitions when present (``lake/bmll/trades_plus``);
-with daily data only, intraday prices fall back to the day VWAP (flag INTRADAY_FALLBACK_DAILY).
+Live snapshots use BMLL Trades Plus @SIP minute bars when the snapshot has them
+(``bmll/trades_plus_minute``: NBBO mid, continuous VWAP and volume per minute); names/sessions
+without bars fall back to the day VWAP (flag INTRADAY_FALLBACK_DAILY on T2 fills).
 """
 
 from __future__ import annotations
@@ -37,10 +38,20 @@ class IntradayService:
         self.md = md
         self._cache: dict[int, np.ndarray] = {}
         self.synthetic = md.data_seed is not None
+        self.live = bool(md.bars)  # live snapshot carrying Trades Plus minute bars
+
+    def has_bars(self, i: int, j: int) -> bool:
+        b = self.md.bars.get(i)
+        return b is not None and bool(np.isfinite(b[0][j]).any())
+
+    def minute_volume(self, i: int, j: int) -> np.ndarray | None:
+        """Real addressable volume per minute (live bars), else None (use curve x daily volume)."""
+        return self.md.bars[i][2][j] if self.has_bars(i, j) else None
 
     def paths(self, i: int) -> np.ndarray | None:
         if not self.synthetic:
-            return None
+            b = self.md.bars.get(i)
+            return None if b is None else b[0]
         if i not in self._cache:
             md = self.md
             opens = np.nan_to_num(md.opn[i], nan=1.0)
@@ -62,8 +73,10 @@ class IntradayService:
         if p is None:
             return float(self.md.vwap[i, j])
         row = p[j]
+        if not self.synthetic and not np.isfinite(row).any():
+            return float(self.md.vwap[i, j])
         if minute <= 0:
-            return float(self.md.opn[i, j])
+            return float(row[0] if not self.synthetic else self.md.opn[i, j])
         k = min(minute, N_MINUTES) - 1
         lo = int(np.floor(k))
         if lo < 0:
@@ -76,6 +89,8 @@ class IntradayService:
     def mid_at_seconds(self, i: int, j: int, seconds_from_open: float) -> float:
         """Second-resolution mid: minute interpolation + a deterministic sub-minute bridge."""
         base = self.price_at(i, j, seconds_from_open / 60.0)
+        if not self.synthetic:
+            return base  # live bars: no synthetic sub-minute noise on real quotes
         sec = int(seconds_from_open)
         h = zlib.crc32(f"{self.md.sessions[i]}:{j}:{sec}".encode()) / 2**32 - 0.5
         frac = (seconds_from_open % 60) / 60
@@ -89,6 +104,14 @@ class IntradayService:
         a, b = int(max(0, minutes_from_open(t0))), int(min(N_MINUTES, np.ceil(minutes_from_open(t1))))
         if b <= a:
             return self.price_at(i, j, a), False
+        if not self.synthetic:
+            if not self.has_bars(i, j):
+                return float(self.md.vwap[i, j]), True
+            _, vw, vol = self.md.bars[i]
+            v = vol[j, a:b]
+            if v.sum() <= 0:
+                return self.price_at(i, j, (a + b) / 2), False
+            return float((vw[j, a:b] * v).sum() / v.sum()), False
         w = VOLUME_CURVE[a:b]
         return float((p[j, a:b] * w).sum() / w.sum()), False
 
