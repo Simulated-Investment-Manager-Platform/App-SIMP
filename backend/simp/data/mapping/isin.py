@@ -59,7 +59,10 @@ EXCH_TO_MIC = {
     "Q": "XNAS",
     "A": "XASE",
     "P": "ARCX",
+    "R": "ARCX",  # CIZ code for NYSE Arca
     "Z": "BATS",
+    "B": "BATS",  # CIZ code for Cboe BZX
+    "I": "IEXG",
 }
 
 

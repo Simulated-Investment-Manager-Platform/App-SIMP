@@ -181,3 +181,44 @@ def test_mapping_with_missing_cusip9() -> None:
         11
     ]
     assert res.review_queue["permno"].to_list() == [2]
+
+
+class _FakeWrds:
+    """Stands in for WRDS: ``tables`` maps schema.table to the columns it has."""
+
+    def __init__(self, tables: dict[str, list[str]]) -> None:
+        self.tables = tables
+        self.queries: list[str] = []
+
+    def fetch(self, sql: str, params=()):  # type: ignore[no-untyped-def]
+        self.queries.append(sql)
+        if "information_schema.columns" in sql:
+            cols = self.tables.get(f"{params[0]}.{params[1]}", [])
+            return pl.DataFrame({"column_name": cols}, schema={"column_name": pl.Utf8})
+        return pl.DataFrame(
+            {"caldt": [date(2026, 6, 30)], "vwretd": [0.0], "vwretx": [0.0], "sprtrn": [0.0], "spindx": [1.0]}
+        )
+
+
+def _benchmark_table(tables: dict[str, list[str]]) -> str:
+    from simp.data.crsp import wrds_loader as wl
+
+    saved = dict(wl.TABLES)
+    try:
+        client = wl.WrdsClient.__new__(wl.WrdsClient)
+        fake = _FakeWrds(tables)
+        client.fetch = fake.fetch  # type: ignore[method-assign]
+        client.benchmark(date(2022, 3, 1), date(2026, 6, 30))
+        return fake.queries[-1].split(" from ")[1].split(" ")[0]
+    finally:
+        wl.TABLES.clear()
+        wl.TABLES.update(saved)
+
+
+def test_benchmark_reads_ciz_dsp500_v2_then_legacy() -> None:
+    cols = ["caldt", "vwretd", "vwretx", "sprtrn", "spindx"]
+    # the CIZ file continues past 2024; the legacy dsp500 stopped at 2024-12-31
+    both = {"crsp_q_indexes.dsp500_v2": cols, "crsp_q_indexes.dsp500": cols}
+    assert _benchmark_table(both) == "crsp_q_indexes.dsp500_v2"
+    assert _benchmark_table({"crsp_q_indexes.dsp500": cols}) == "crsp_q_indexes.dsp500"
+    assert _benchmark_table({"crsp.dsp500": cols}) == "crsp.dsp500"

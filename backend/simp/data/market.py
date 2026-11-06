@@ -23,15 +23,38 @@ from simp.errors import LookAheadError
 # mapped is classified from the amounts, and an unclassifiable event becomes "UNK", which stops
 # the run if the fund holds the security (never silently ignored). Extend DISTYPE_MAP when a
 # release uses new codes.
-DISTYPE_MAP = {"CD": "CD", "FS": "FS", "SO": "SO", "RI": "RI", "MG": "MG"}
+DISTYPE_MAP = {
+    "CD": "CD",
+    "FS": "FS",
+    "SO": "SO",
+    "RI": "RI",
+    "MG": "MG",
+    # CRSP CIZ v2 codes
+    "SD": "CD",  # special (cash) dividend
+    "ROC": "CD",  # return of capital, paid in cash
+    "FRS": "FS",  # forward or reverse split; share factor is 1 + disfacshr
+}
+# CIZ cash (CP) and stock (SP) payments with disfacshr = -1 retire the security: merger or
+# acquisition proceeds on the delisting date.
+TERMINATING_PAYMENTS = ("CP", "SP")
+# CIZ leaves disdeclaredt empty on those delistings (and on some spin-offs, or dates it on/after
+# the ex-date). Such deals are public well before they complete, so an unsupported event (SO, RI,
+# MG) without a usable declaration date is treated as declared this many sessions before the
+# ex-date: enough for the strategy to exclude the name and exit before the event.
+IMPUTED_NOTICE_SESSIONS = 5
+UNSUPPORTED_KINDS = ("SO", "RI", "MG")
 
 
 def classify_distribution(r: dict[str, object]) -> str:
     code = str(r.get("distype") or "").strip().upper()
-    if code in DISTYPE_MAP:
-        return DISTYPE_MAP[code]
     amt = float(r.get("disdivamt") or 0.0)  # type: ignore[arg-type]
     fac = float(r.get("disfacshr") or 0.0)  # type: ignore[arg-type]
+    if code in TERMINATING_PAYMENTS and fac <= -1.0 + 1e-9:
+        return "MG"
+    if code == "SP":  # stock of another company, security survives: a spin-off
+        return "SO"
+    if code in DISTYPE_MAP:
+        return DISTYPE_MAP[code]
     if fac > 0 and amt == 0:
         return "FS"
     if amt > 0 and fac == 0:
@@ -54,6 +77,7 @@ class CorpAction:
     amount: float
     factor: float
     provisional: bool = False
+    declared_imputed: bool = False
 
 
 @dataclass
@@ -95,6 +119,8 @@ class MarketData:
     data_seed: int | None = None  # synthetic generator seed (intraday paths); None for live data
     mbr_start: dict[int, list[tuple[date, date]]] = field(default_factory=dict)
     pos: dict[int, int] = field(default_factory=dict)
+    # CRSP stkdelists: permno -> (delisting date, delisting return or None)
+    delisted: dict[int, tuple[date, float | None]] = field(default_factory=dict)
     _horizon: int | None = None
 
     @property
@@ -189,6 +215,13 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
     def M(c: str, fill: float = np.nan) -> np.ndarray:
         return _matrix(md, c, mdi, mji, shp, fill)
 
+    # Days a traded name has no BMLL row (a gap in its listing map) price at the CRSP close,
+    # as derived/market_daily already does for missing values inside a row.
+    vwap, twap = M("vwap"), M("twap")
+    gap = np.isfinite(prc)
+    vwap = np.where(np.isfinite(vwap) | ~gap, vwap, prc)
+    twap = np.where(np.isfinite(twap) | ~gap, twap, prc)
+
     smap = lake.read(snapshot, "derived", "security_map")
     listing = np.zeros(N, np.int64)
     mapped = np.zeros(N, bool)
@@ -199,7 +232,12 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
 
     secinfo = lake.read(snapshot, "crsp", "stksecurityinfohist").sort("secinfostartdt")
     tick = {int(p): t for p, t in secinfo.select("permno", "ticker").iter_rows()}
-    prim = {int(p): exch_to_mic(e) for p, e in secinfo.select("permno", "primaryexch").iter_rows()}
+    # latest listing venue the desk can route to; CIZ marks delisted rows "X" (not listed)
+    prim: dict[int, str] = {}
+    for p, e in secinfo.select("permno", "primaryexch").iter_rows():
+        mic = exch_to_mic(e)
+        if mic in VENUES and mic != "DARK":
+            prim[int(p)] = mic
     tickers = [tick.get(int(p), str(p)) for p in permnos]
     primary = [prim.get(int(p), "XNYS") for p in permnos]
 
@@ -218,6 +256,15 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
         if p not in pos or r["disexdt"] not in dpos:
             continue
         kind = classify_distribution(r)
+        declared = r.get("disdeclaredt")
+        ex_i = dpos[r["disexdt"]]
+        # usable only if the fund can still trade out before the ex-date (decide at a close at
+        # least two sessions ahead, exit at the next session's close)
+        imputed = kind in UNSUPPORTED_KINDS and (
+            declared is None or ex_i < 2 or declared > sessions[ex_i - 2]
+        )
+        if imputed:
+            declared = sessions[max(ex_i - IMPUTED_NOTICE_SESSIONS, 0)]
         actions.append(
             CorpAction(
                 j=pos[p],
@@ -226,13 +273,21 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
                 ex_i=dpos[r["disexdt"]],
                 ex=r["disexdt"],
                 pay=r["dispaydt"],
-                declared=r.get("disdeclaredt"),
+                declared=declared,
                 amount=float(r["disdivamt"] or 0.0),
                 factor=float(r["disfacshr"] or 0.0) + 1.0 if kind == "FS" else 1.0,
                 provisional=kind == "CD" and r["dispaydt"] is None,
+                declared_imputed=imputed,
             )
         )
     actions.sort(key=lambda a: (a.ex_i, a.permno, a.kind))
+
+    delisted: dict[int, tuple[date, float | None]] = {}
+    if "crsp/stkdelists" in lake.snapshot(snapshot)["manifests"]:
+        dl = lake.read(snapshot, "crsp", "stkdelists")
+        for p, d, r in dl.select("permno", "delistingdt", "delret").iter_rows():
+            if int(p) in pos and d is not None:
+                delisted[int(p)] = (d, None if r is None or not np.isfinite(r) else float(r))
 
     return MarketData(
         snapshot=snapshot,
@@ -252,8 +307,8 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
         vwretd=vwretd,
         vwretx=vwretx,
         sp_tr=sp_tr,
-        vwap=M("vwap"),
-        twap=M("twap"),
+        vwap=vwap,
+        twap=twap,
         auc_price=M("close_auction_price"),
         auc_vol=M("auction_volume", 0.0),
         auc_med20=M("auc_median20"),
@@ -271,5 +326,6 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
         mapped=mapped,
         mbr_start=mbr_start,
         pos=pos,
+        delisted=delisted,
         data_seed=data_seed,
     )

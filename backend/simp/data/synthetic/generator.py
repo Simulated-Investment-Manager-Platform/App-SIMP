@@ -28,6 +28,7 @@ import numpy as np
 import polars as pl
 
 from simp.accounting.calendar import SessionCalendar, nyse_sessions, quarterly_effective_dates
+from simp.data.derived import SQRT_252
 from simp.data.mapping.isin import isin_from_cusip9
 from simp.rng import component_rng
 
@@ -589,7 +590,11 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
     last_cont = prc / (1 + disloc_bps / 1e4)
 
     rv = component_rng(seed, "bmll_vol")
-    vol_intraday = sig_d[None, :] * np.exp(rv.normal(0, 0.2, (D, N))) * (1 + 10 * np.abs(eps))
+    # BMLL reports Volatility|Intraday annualised; the engine works with the daily figure.
+    # Round-trip through the stored (annualised) value so derived/market_daily reproduces the
+    # exact daily vol the intraday paths below were generated with.
+    vol_intraday_ann = sig_d[None, :] * np.exp(rv.normal(0, 0.2, (D, N))) * (1 + 10 * np.abs(eps)) * SQRT_252
+    vol_intraday = vol_intraday_ann / SQRT_252
     vwap = np.zeros((D, N))
     twap = np.zeros((D, N))
     for i in range(D):
@@ -613,16 +618,18 @@ def generate(seed: int = 20260321, start: date = DATA_START, end: date = DATA_EN
             "TWAP": np.round(twap[di, ji], 4),
             "ClosingAuctionPrice|Executed": cap_auction[di, ji],
             "OpeningAuctionPrice|Executed": opens[di, ji],
-            "Spread|RelTWA": spread_bps[di, ji] / 1e4,
-            "Spread|RelVWA": spread_bps[di, ji] * 0.92 / 1e4,
+            # BMLL Data Lab units: relative spreads and dislocation in bps, absolute spread and
+            # sweep-to-fill costs in USD per share, intraday volatility annualised.
+            "Spread|RelTWA": spread_bps[di, ji],
+            "Spread|RelVWA": spread_bps[di, ji] * 0.92,
             "Spread|AbsTWA": spread_bps[di, ji] / 1e4 * prc[di, ji],
-            "Volatility|Intraday": vol_intraday[di, ji],
-            "SweepToFill|25kUSDTWASpread": spread_bps[di, ji] * 1.05 / 1e4,
-            "SweepToFill|100kUSDTWASpread": sweep100[di, ji] / 1e4,
-            "SweepToFill|250kUSDTWASpread": sweep100[di, ji] * 1.6 / 1e4,
+            "Volatility|Intraday": vol_intraday_ann[di, ji],
+            "SweepToFill|25kUSDTWASpread": spread_bps[di, ji] * 1.05 / 1e4 * prc[di, ji],
+            "SweepToFill|100kUSDTWASpread": sweep100[di, ji] / 1e4 * prc[di, ji],
+            "SweepToFill|250kUSDTWASpread": sweep100[di, ji] * 1.6 / 1e4 * prc[di, ji],
             "AuctionOrderImbalance|Abs": np.abs(imb_qty[di, ji]),
             "AuctionOrderImbalance|Notional": imb_qty[di, ji] * prc[di, ji],
-            "AuctionDislocation|ClosingLast": disloc_bps[di, ji] / 1e4,
+            "AuctionDislocation|ClosingLast": disloc_bps[di, ji],
             "Volume": vol[di, ji],
         }
     )

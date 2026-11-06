@@ -8,9 +8,18 @@
 
 from __future__ import annotations
 
+import math
+
 import polars as pl
 
 from simp.data.mapping.builder import MappingResult, build_security_map
+
+# BMLL Data Lab daily-analytics units (checked against the live pull: Spread|AbsTWA / price
+# matches Spread|RelTWA / 1e4, and Volatility|Intraday / realised daily sigma ~ sqrt(252)):
+#   Spread|RelTWA, AuctionDislocation|ClosingLast   basis points
+#   Spread|AbsTWA, SweepToFill|*                    USD per share
+#   Volatility|Intraday                             annualised
+SQRT_252 = math.sqrt(252)
 
 
 def build_mapping(raw: dict[tuple[str, str], pl.DataFrame]) -> MappingResult:
@@ -161,10 +170,13 @@ def build_market_daily(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFr
         "adv20",
         "adv60",
         "auc_median20",
-        (pl.col("Spread|RelTWA") * 1e4).fill_null(5.0).alias("spread_bps"),
-        pl.col("Volatility|Intraday").fill_null(0.015).alias("vol_intraday"),
-        (pl.col("SweepToFill|100kUSDTWASpread") * 1e4).fill_null(10.0).alias("sweep_100k_bps"),
-        (pl.col("AuctionDislocation|ClosingLast") * 1e4).fill_null(0.0).alias("dislocation_bps"),
+        pl.col("Spread|RelTWA").fill_nan(None).fill_null(5.0).alias("spread_bps"),
+        (pl.col("Volatility|Intraday") / SQRT_252).fill_nan(None).fill_null(0.015).alias("vol_intraday"),
+        (pl.col("SweepToFill|100kUSDTWASpread") / pl.col("dlyprc").abs() * 1e4)
+        .fill_nan(None)
+        .fill_null(10.0)
+        .alias("sweep_100k_bps"),
+        pl.col("AuctionDislocation|ClosingLast").fill_nan(None).fill_null(0.0).alias("dislocation_bps"),
         pl.col("ClosingAuctionPrice|Executed").fill_nan(None).is_null().alias("auction_price_fallback"),
         pl.col("auction_volume_raw").is_null().alias("auction_volume_fallback"),
     )

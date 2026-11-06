@@ -52,7 +52,8 @@ class SyntheticGenerator:
         rng = component_rng(e.cfg.seed, "generator", md.sessions[i])
         n = int(rng.poisson(g.lam))
         adv = md.adv20[i]  # trailing, excludes today: known pre-open
-        ok = md.member[i - 1] & md.mapped & np.isfinite(adv) & (adv > 0) & np.isfinite(md.prc[i - 1])
+        prior = e.prior_close(i)
+        ok = md.member[i - 1] & md.mapped & np.isfinite(adv) & (adv > 0) & np.isfinite(prior)
         ts = ny_ts(md.sessions[i], time(9, 15))
         out: list[PmOrder] = []
         # names with a declared unsupported corporate action: never picked, and flattened before the ex-date
@@ -65,7 +66,7 @@ class SyntheticGenerator:
         for j in pending:
             ok[j] = False
             held = e.projected_holdings(i)[j]
-            if held != 0 and np.isfinite(md.prc[i - 1, j]):
+            if held != 0 and np.isfinite(prior[j]):
                 d0 = Decision(
                     e.ids.new(ts), e.run_id, e.cfg.fund_id, "CORP_ACTION_EXIT", md.sessions[i - 1], day, ts
                 )
@@ -82,7 +83,7 @@ class SyntheticGenerator:
                         quantity=float(abs(held)),
                         reason=str(Reason.CORP_ACTION),
                         decision_ts=ts,
-                        decision_price=float(md.prc[i - 1, j]),
+                        decision_price=float(prior[j]),
                         decision_price_source=str(DecisionPriceSource.PRIOR_CLOSE),
                         instruction="TARGET_CLOSE",
                         deadline_ts=close_ts(day),
@@ -124,7 +125,7 @@ class SyntheticGenerator:
                     quantity=float(q),
                     reason=str(Reason.SYNTHETIC_TEST),
                     decision_ts=ts,
-                    decision_price=float(md.prc[i - 1, j]),
+                    decision_price=float(prior[j]),
                     decision_price_source=str(DecisionPriceSource.PRIOR_CLOSE),
                     instruction=str(inst[k]),
                     deadline_ts=close_ts(md.sessions[i]),

@@ -67,6 +67,9 @@ class IndexReplication:
                     if cal.is_session(d1) and cal.index(d1) not in qend and cal.index(d1) < md.D - 1:
                         self._add_off(cal.index(d1), j, "DELETE")
         self.reviews = e.ca_reviews
+        # (security, ex session) pairs with a split: an event sharing its ex-date with a split is
+        # ambiguous (which share count does it apply to?) so it is never kept, only excluded
+        self.split_days = {(a.j, a.ex_i) for a in md.actions if a.kind == "FS"}
         self.events_by_declared: dict[int, list[int]] = {}
         for k, a in enumerate(md.actions):
             if a.kind in UNSUPPORTED and a.declared is not None:
@@ -97,7 +100,11 @@ class IndexReplication:
             if a.kind not in UNSUPPORTED or a.declared is None:
                 continue
             if a.declared <= day < a.ex:
-                keepable = a.kind != "MG" and self._review(k) == ReviewStatus.APPROVED
+                keepable = (
+                    a.kind != "MG"
+                    and self._review(k) == ReviewStatus.APPROVED
+                    and (a.j, a.ex_i) not in self.split_days
+                )
                 if cfg.exclusion_policy == "exclude_securities" or not keepable:
                     out[a.j] = f"pending {a.kind} ex {a.ex} ({self._review(k)})"
         for j in np.where(~md.mapped)[0]:
@@ -231,11 +238,16 @@ class IndexReplication:
             for k, a in enumerate(md.actions)
             if a.kind in UNSUPPORTED and a.declared is not None and a.declared <= day < a.ex
         ]
+        exiting: set[int] = set()
         for k in pending_events:  # re-checked daily: a partly filled exit is re-issued
             a = md.actions[k]
             excl = excl if excl is not None else self.excluded(i)
             if a.j not in excl or i + 1 > e.i1 or md.sessions[i + 1] >= a.ex:
                 continue
+            # one exit per security: a delisting can carry several rows (e.g. CIZ cash + stock legs)
+            if a.j in exiting:
+                continue
+            exiting.add(a.j)
             # cancel any not-yet-executed buys decided before the event was declared
             for orders in e.pending_pm.values():
                 for o in list(orders):
@@ -281,7 +293,7 @@ class IndexReplication:
         if not (fc.enabled or fc.cash_sweep):
             return []
         md.guard(i - 1)
-        px = md.prc[i - 1]
+        px = e.prior_close(i)
         nav_prev = e.nav
         pend = e.pending_pm.get(i, [])
         committed = sum(

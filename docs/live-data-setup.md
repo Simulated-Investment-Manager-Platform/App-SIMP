@@ -21,7 +21,7 @@ vendor S&P 500 TR (optional) --5--> lake/vendor/sp500_tr            v
 
 | Item | Detail |
 |---|---|
-| **WRDS account** | With a **CRSP CIZ (v2)** subscription: schemas `crsp_q_stock` (`dsf_v2`, `stksecurityinfohist`, `stkdistributions`, `stkdelists`) and `crsp_q_indexes` (`dsp500list_v2`, `dsp500`). If `dsp500` is not in `crsp_q_indexes` in your release, the loader falls back to legacy `crsp.dsp500`. |
+| **WRDS account** | With a **CRSP CIZ (v2)** subscription: schemas `crsp_q_stock` (`dsf_v2`, `stksecurityinfohist`, `stkdistributions`, `stkdelists`) and `crsp_q_indexes` (`dsp500list_v2`, `dsp500_v2`). The S&P 500 benchmark comes from `dsp500_v2`; the legacy `dsp500` file (also `crsp.dsp500`) stopped at 2024-12-31 and is used only as a fallback when `dsp500_v2` is missing, in which case the pull logs `wrds.benchmark_short`. |
 | **BMLL account** | **Data Lab SDK** access with an **SSH key registered** to your account. Entitlements for US equities: daily analytics and classified trades on the primary venues (XNYS, XNAS, ARCX, BATS) plus `@SIP`. Optional: Trades Plus `@SIP` (needed for T2 on live data) and the Auction Imbalance dataset. |
 | **Official S&P 500 TR** (optional) | A licensed daily total-return series (Compustat or another vendor). It is benchmark (b); the default benchmark (a) is CRSP `vwretd`. |
 | **Network** | Outbound **TCP to `wrds-pgdata.wharton.upenn.edu:9737`**. This is the raw Postgres protocol, so HTTPS-only or TLS-intercepting proxies will not work. You also need outbound HTTPS to BMLL. |

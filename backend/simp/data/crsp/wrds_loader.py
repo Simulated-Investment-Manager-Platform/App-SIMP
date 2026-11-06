@@ -32,8 +32,12 @@ TABLES: dict[str, tuple[str, str, str | None]] = {
     "stkdistributions": ("crsp_q_stock", "stkdistributions", "disexdt"),
     "stkdelists": ("crsp_q_stock", "stkdelists", None),
     "dsp500list_v2": ("crsp_q_indexes", "dsp500list_v2", None),
-    "dsp500": ("crsp_q_indexes", "dsp500", "caldt"),
+    # CIZ S&P 500 index file. The legacy ``dsp500`` (same columns) stopped at 2024-12-31 when CRSP
+    # retired the SIZ format; ``dsp500_v2`` continues it and matches it to 1e-6 where they overlap.
+    "dsp500": ("crsp_q_indexes", "dsp500_v2", "caldt"),
 }
+# Older WRDS releases without dsp500_v2: try these in order (data ends 2024-12-31).
+DSP500_FALLBACKS = [("crsp_q_indexes", "dsp500", "caldt"), ("crsp", "dsp500", "caldt")]
 
 
 def _batches(xs: Sequence[int], n: int = BATCH_SIZE) -> Iterator[Sequence[int]]:
@@ -87,10 +91,15 @@ class WrdsClient:
         )
 
     def check_schema(self, dataset: str) -> None:
-        schema, table, _ = TABLES[dataset]
         if dataset == "dsp500" and not self.live_columns(dataset):
-            TABLES["dsp500"] = ("crsp", "dsp500", "caldt")  # legacy SIZ location of the S&P 500 index file
-            schema, table, _ = TABLES[dataset]
+            for fb in DSP500_FALLBACKS:
+                TABLES["dsp500"] = fb
+                if self.live_columns(dataset):
+                    log.warning(
+                        "wrds.dsp500_fallback", table=f"{fb[0]}.{fb[1]}", note="legacy file ends 2024-12-31"
+                    )
+                    break
+        schema, table, _ = TABLES[dataset]
         live = set(
             self.fetch(
                 "select column_name from information_schema.columns where table_schema=%s and table_name=%s",
@@ -130,10 +139,18 @@ class WrdsClient:
 
     def benchmark(self, start: date, end: date) -> pl.DataFrame:
         self.check_schema("dsp500")
-        return self.fetch(
-            "select caldt, vwretd, vwretx, sprtrn, spindx from crsp_q_indexes.dsp500 where caldt between %s and %s",
+        schema, table, _ = TABLES["dsp500"]
+        df = self.fetch(
+            f"select caldt, vwretd, vwretx, sprtrn, spindx from {schema}.{table} where caldt between %s and %s",  # noqa: S608
             (start, end),
         )
+        last = df["caldt"].max() if df.height else None
+        # warn when the file stops well before the pull window (e.g. a legacy file ending 2024-12-31)
+        if not isinstance(last, date) or (end - last).days > 5:
+            log.warning(
+                "wrds.benchmark_short", table=f"{schema}.{table}", last=str(last), requested_end=str(end)
+            )
+        return df
 
 
 def _conform_all(raw: dict[tuple[str, str], pl.DataFrame]) -> dict[tuple[str, str], pl.DataFrame]:

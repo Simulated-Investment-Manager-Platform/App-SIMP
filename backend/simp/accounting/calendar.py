@@ -123,7 +123,14 @@ class SessionCalendar:
 
     def settlement_date(self, trade_date: date) -> date:
         lag = 1 if trade_date >= T1_CUTOVER else 2
-        return self.offset(trade_date, lag)
+        k = self._pos[trade_date] + lag
+        if k < len(self.sessions):
+            return self.sessions[k]
+        # trades on the last sessions of the data (a live CRSP pull ending on the window end)
+        # settle after it: continue on the rule-based NYSE calendar
+        last = self.sessions[-1]
+        after = nyse_sessions(last + timedelta(days=1), last + timedelta(days=14))
+        return after[k - len(self.sessions)]
 
 
 def third_friday(year: int, month: int) -> date:

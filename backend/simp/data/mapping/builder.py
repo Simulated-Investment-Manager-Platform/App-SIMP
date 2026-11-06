@@ -42,12 +42,21 @@ def build_security_map(
     prim = ref.filter(pl.col("IsPrimary") & (pl.col("MIC") == pl.col("OPOL")))
     # An ISIN (or ticker) identifies the listing; the listing itself is stable across identifier
     # changes, so a matched listing is valid for its whole life, not only the identifier's interval.
-    life = {
+    # Reference rows come from periodic (monthly) snapshots, so a listing that starts mid-month
+    # (e.g. a new ISIN after a split) would only appear from the next snapshot; widen its life to
+    # every date BMLL actually has daily data for it.
+    traded = {
         int(lid): (a, b)
-        for lid, a, b in ref.group_by("ListingId")
-        .agg(pl.col("ValidFrom").min(), pl.col("ValidTo").max())
+        for lid, a, b in bmll_close.group_by("ListingId")
+        .agg(pl.col("Date").min().alias("first"), pl.col("Date").max().alias("last"))
         .iter_rows()
     }
+    life: dict[int, tuple[date, date]] = {}
+    for lid, a, b in (
+        ref.group_by("ListingId").agg(pl.col("ValidFrom").min(), pl.col("ValidTo").max()).iter_rows()
+    ):
+        t = traded.get(int(lid))
+        life[int(lid)] = (min(a, t[0]), max(b, t[1])) if t else (a, b)
     sip = (
         ref.filter(pl.col("MIC") == "@SIP")
         .select("InstrumentId", "ListingId", "ValidFrom", "ValidTo")
@@ -98,7 +107,7 @@ def build_security_map(
                     cands.append((r, "TICKER_PRICE_CHECK", 0.9))
         placed = False
         for r, method, conf in cands:
-            lf, lt = life.get(int(r["ListingId"]), (r["ValidFrom"], r["ValidTo"]))  # type: ignore[call-overload]
+            lf, lt = life.get(int(r["ListingId"]), (r["ValidFrom"], r["ValidTo"]))  # type: ignore[call-overload,arg-type]
             ov = _overlap(s0, s1, lf, lt)
             if ov is None:
                 continue

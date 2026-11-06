@@ -120,6 +120,17 @@ class Ledger:
     def split(self, ts: datetime, j: int, permno: int, delta_qty: float, ref: str) -> None:
         self.post(ts, Account.SECURITY, 0.0, "SPLIT", ref, permno, delta_qty, j)
 
+    def cash_in_lieu(self, ts: datetime, permno: int, amount: float, ref: str) -> None:
+        """Cash paid for the fractional share a split leaves (the share leg is in ``split``)."""
+        self.post(ts, Account.CASH, amount, "CASH_IN_LIEU", ref, permno)
+        self.post(ts, Account.INCOME, amount, "CASH_IN_LIEU", ref, permno)
+
+    def delisting(self, ts: datetime, j: int, permno: int, qty: float, price: float, ref: str) -> None:
+        """Close a position in a security that stopped trading: the shares leave at ``price`` and
+        the proceeds arrive as cash."""
+        self.post(ts, Account.SECURITY, -qty * price, "DELISTING", ref, permno, -qty, j)
+        self.post(ts, Account.CASH, qty * price, "DELISTING", ref, permno)
+
     def fee(self, ts: datetime, amount: float, ref: str) -> None:
         self.post(ts, Account.CASH, -amount, "MGMT_FEE", ref)
         self.post(ts, Account.FEE, amount, "MGMT_FEE", ref)
@@ -150,7 +161,7 @@ class Ledger:
         tol: float = 0.01,
     ) -> None:
         ln = self.nav(close)
-        if abs(ln - engine_nav) > tol:
+        if not (np.isfinite(ln) and np.isfinite(engine_nav)) or abs(ln - engine_nav) > tol:
             raise NavIdentityError(
                 f"ledger NAV {ln:,.4f} != engine NAV {engine_nav:,.4f} (diff {ln - engine_nav:,.4f})",
                 session=day,

@@ -87,9 +87,15 @@ every session against an independent P&L path, and any break stops the run with 
   square-root impact models; **T2** tick replay capped at 10% of each interval's volume. **T3**
   (`bmll2.simulation`) is Data Lab–only: the engine raises with instructions and
   `simp lab t3-job` writes the job spec.
-- Hard stops: missing price, unreviewed or unsupported corporate action on a held name, fractional
-  split share, same-day split plus dividend, and negative net liquid cash. No merger payoff is ever
-  invented: names with a declared unsupported event are excluded and exited before the ex-date.
+- Hard stops: missing price, unreviewed or unsupported corporate action on a held name, same-day
+  split plus dividend, and negative net liquid cash. No merger payoff is ever invented: names with a
+  declared unsupported event are excluded and exited before the ex-date. CRSP CIZ often leaves the
+  declaration date empty (cash/stock merger payments, some spin-offs); those events count as
+  declared 5 sessions before the ex-date.
+- Splits that leave a fractional share (3-for-2, reverse splits) pay the fraction as cash in lieu
+  at the split-adjusted prior close. A held name that CRSP delists and stops pricing (SVB and
+  Signature Bank, March 2023) is closed at its last CRSP close x (1 + delisting return) and paid
+  in cash; a missing price on any other held name is still a hard stop.
 - Look-ahead guard; seeded PCG64 draws per (seed, component, date); deterministic ULIDs.
 
 **Phase 1 generator.** Orders per day are Poisson(λ = 40). Names are drawn by ADV20 weight. Size

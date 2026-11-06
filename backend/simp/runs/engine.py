@@ -106,6 +106,7 @@ class Engine:
         self.ca_reviews = ca_reviews or {}
         self.pending_pm: dict[int, list[PmOrder]] = defaultdict(list)
         self.today_flow = 0.0
+        self.split_today = np.ones(md.N)  # share factor of splits going ex in the current session
         # outputs
         self.decisions: list[Decision] = []
         self.target_weights: list[TargetWeight] = []
@@ -132,6 +133,13 @@ class Engine:
                 for o in orders:
                     h[self.md.j(o.permno)] += side_sign(o.side) * o.quantity * o.quantity_adjustment_factor
         return h
+
+    def prior_close(self, i: int) -> np.ndarray:
+        """Session i-1 close in session i share units. Positions and open orders are rescaled
+        pre-open on a split's ex-date, so anything sized against them must use this, not the raw
+        CRSP close (e.g. GOOGL 20:1 on 2022-07-18 would otherwise be sized at 20x its price)."""
+        out: np.ndarray = self.md.prc[i - 1] / self.split_today
+        return out
 
     def _schedule(self, orders: list[PmOrder]) -> None:
         for o in orders:
@@ -178,19 +186,35 @@ class Engine:
                             o.quantity_adjustment_factor *= a.factor
                 if held != 0:
                     new = held * a.factor
-                    if abs(new - round(new)) > 1e-9:
-                        raise CorporateActionError(
-                            f"fractional split share for permno {a.permno}: {held} x {a.factor}", session=day
-                        )
-                    self.ledger.split(ts, j, a.permno, new - held, f"FS:{a.permno}:{a.ex}")
-                    self.pos[j] = new
+                    ref = f"FS:{a.permno}:{a.ex}"
+                    # a fractional share (3-for-2, reverse splits) is paid out as cash in lieu at
+                    # the split-adjusted prior close; the position keeps the whole shares
+                    if abs(new - round(new)) <= 1e-9:
+                        whole = float(round(new))
+                    else:
+                        whole = float(math.floor(new) if new > 0 else math.ceil(new))
+                    cil = 0.0
+                    if whole != new:
+                        px = float(md.prc[i - 1, j]) / a.factor
+                        if not math.isfinite(px):
+                            raise CorporateActionError(
+                                f"fractional split share for permno {a.permno} ({held} x {a.factor}) and no "
+                                "prior close to pay cash in lieu",
+                                session=day,
+                            )
+                        cil = (new - whole) * px
+                        self.ledger.cash_in_lieu(ts, a.permno, cil, ref)
+                        self._income += cil
+                        self.flags["CASH_IN_LIEU"] += 1
+                    self.ledger.split(ts, j, a.permno, whole - held, ref)
+                    self.pos[j] = whole
                     self.ca_events.append(
                         dict(
                             date=day,
                             permno=a.permno,
                             kind="FS",
                             shares=held,
-                            amount=0.0,
+                            amount=cil,
                             factor=a.factor,
                             booked=True,
                         )
@@ -299,7 +323,7 @@ class Engine:
                     )
                     remaining[o.pm_order_id] -= q
                     left -= q
-            px = float(md.prc[i - 1, md.j(permno)])
+            px = float(self.prior_close(i)[md.j(permno)])
             self.netting.append(
                 dict(
                     date=day,
@@ -328,6 +352,10 @@ class Engine:
         start = max(start, o.decision_ts)
         j = md.j(o.permno)
         arrival = self.intra.price_at(i, j, minutes_from_open(window[0]))
+        if not math.isfinite(arrival):  # the name did not trade today (halted / delisted)
+            arrival = float(self.prior_close(i)[j]) if i > 0 else float("nan")
+            if not math.isfinite(arrival):
+                arrival = o.decision_price
         b = BROKERS[broker]
         comm = (
             b.portfolio_fee_bps
@@ -369,7 +397,7 @@ class Engine:
             trader += self._net(i, orders, remaining)
         # cash-shortfall scaling: sells before buys; buys scale down rather than borrow
         if self.fund_type != FundType.SYNTHETIC:
-            px = np.nan_to_num(md.prc[i - 1])
+            px = np.nan_to_num(self.prior_close(i))
             sig = np.nan_to_num(md.vol_intraday[i - 1], nan=0.015)
             bn = [
                 (remaining[o.pm_order_id] * px[md.j(o.permno)], sig[md.j(o.permno)])
@@ -400,8 +428,9 @@ class Engine:
                 self.flags["CASH_SCALED_DAYS"] += 1
         # basket detection for portfolio trades
         small: dict[str, list[PmOrder]] = defaultdict(list)
+        prior = np.nan_to_num(self.prior_close(i))
         for o in orders:
-            n = remaining[o.pm_order_id] * float(np.nan_to_num(md.prc[i - 1, md.j(o.permno)]))
+            n = remaining[o.pm_order_id] * float(prior[md.j(o.permno)])
             if (
                 o.instruction == "TARGET_CLOSE"
                 and n <= 25_000
@@ -414,7 +443,7 @@ class Engine:
             if q <= 0:
                 continue
             j = md.j(o.permno)
-            pxp = float(np.nan_to_num(md.prc[i - 1, j]))
+            pxp = float(prior[j])
             eav = self.expected_auction(i, j)
             bkey = (
                 o.decision_id
@@ -488,6 +517,43 @@ class Engine:
         self._trade_costs = costs_total
         return pnl
 
+    def _settle_delisted(self, i: int) -> float:
+        """Close held positions in securities CRSP has delisted and stopped pricing (e.g. SVB and
+        Signature Bank, March 2023): the shares leave at the last CRSP close x (1 + delisting
+        return, when CRSP has one), paid as cash. A missing price on a name that is not delisted
+        is still a hard stop (MissingPriceError). Returns the proceeds for the P&L path."""
+        md = self.md
+        day = md.sessions[i]
+        proceeds = 0.0
+        for j in np.where((self.pos != 0) & ~np.isfinite(md.prc[i]))[0]:
+            permno = int(md.permnos[j])
+            dl = md.delisted.get(permno)
+            if dl is None or dl[0] > day:
+                continue
+            hist = md.prc[: i + 1, j]
+            last = np.where(np.isfinite(hist) & (hist > 0))[0]
+            if not len(last):
+                continue
+            px = float(hist[last[-1]]) * (1.0 + (dl[1] or 0.0))
+            qty = float(self.pos[j])
+            self.ledger.delisting(close_ts(day), int(j), permno, qty, px, f"DL:{permno}:{dl[0]}")
+            self.pos[j] = 0.0
+            proceeds += qty * px
+            self.flags["DELISTING_SETTLED"] += 1
+            self.ca_events.append(
+                dict(
+                    date=day,
+                    permno=permno,
+                    kind="DL",
+                    shares=qty,
+                    amount=qty * px,
+                    factor=1.0,
+                    booked=True,
+                    provisional=dl[1] is None,
+                )
+            )
+        return proceeds
+
     # ------------------------------------------------------------------ main loop
     def run(self) -> EngineOutput:
         md, cfg = self.md, self.cfg
@@ -509,10 +575,14 @@ class Engine:
                     if a.ex_i == i and a.kind == "FS":
                         split[a.j] = a.factor
                 pos_before = self.pos.copy()
+                self.split_today = split
                 self._pre_open(i)
+                pos_open = self.pos.copy()  # after splits (whole shares; fractions paid in cash)
             else:
                 split = np.ones(md.N)
                 pos_before = self.pos.copy()
+                self.split_today = split
+                pos_open = self.pos.copy()
             # 2. morning decisions (flows drawn from yesterday's AUM)
             self.today_flow = 0.0
             is_jump = False
@@ -539,13 +609,14 @@ class Engine:
                 )
             # 6. post-close
             close = md.prc[i]
+            delist_proceeds = self._settle_delisted(i)
             held = self.pos != 0
             if np.any(held & ~np.isfinite(close)):
                 bad = [int(md.permnos[j]) for j in np.where(held & ~np.isfinite(close))[0]]
                 raise MissingPriceError(f"missing CRSP close for held permnos {bad}", session=day)
             c = np.where(np.isfinite(close), close, 0.0)
-            mtm = float(np.dot(pos_before, c * split - prev_close)) if i > self.i0 else 0.0
-            nav_pre_fee = nav_prev + mtm + self._income + trade_pnl
+            mtm = float(np.dot(pos_open, c) - np.dot(pos_before, prev_close)) if i > self.i0 else 0.0
+            nav_pre_fee = nav_prev + mtm + self._income + trade_pnl + delist_proceeds
             fee = nav_pre_fee * cfg.fee_bps / 1e4 / 252 if i > self.i0 else 0.0
             if fee:
                 self.ledger.fee(close_ts(day), fee, f"FEE:{day}")
