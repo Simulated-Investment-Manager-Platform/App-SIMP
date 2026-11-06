@@ -136,7 +136,18 @@ def login() -> None:
 CHUNKS: Path | None = None  # set in main(): <out>/_chunks, one Parquet per finished batch (resume on restart)
 
 
-def _batched(name: str, items: list, size: int, fetch) -> pd.DataFrame:  # type: ignore[no-untyped-def]
+def _chunk_files(name: str, items: list, size: int) -> list[Path]:  # type: ignore[type-arg]
+    import hashlib
+
+    n = (len(items) + size - 1) // size
+    out = []
+    for k in range(n):
+        key = hashlib.md5(repr(items[k * size : (k + 1) * size]).encode()).hexdigest()[:10]
+        out.append((CHUNKS or Path(".")) / f"{name}_{k:04d}_{key}.parquet")
+    return out
+
+
+def _batched(name: str, items: list, size: int, fetch, keep: bool = True) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     """Run ``fetch`` per batch with progress output; each finished batch is saved and skipped on restart."""
     import hashlib
     import time
@@ -150,14 +161,16 @@ def _batched(name: str, items: list, size: int, fetch) -> pd.DataFrame:  # type:
         key = hashlib.md5(repr(batch).encode()).hexdigest()[:10]
         f = CHUNKS / f"{name}_{k:04d}_{key}.parquet" if CHUNKS else None
         if f is not None and f.exists():
-            frames.append(pd.read_parquet(f))
+            if keep:
+                frames.append(pd.read_parquet(f))
             print(f"  {name}: batch {k + 1}/{n} already done", flush=True)
             continue
         t = time.time()
         df = fetch(batch)
         if f is not None:
             df.to_parquet(f)
-        frames.append(df)
+        if keep:
+            frames.append(df)
         done = time.time() - t0
         eta = done / (k + 1) * (n - k - 1)
         print(
@@ -317,19 +330,55 @@ def daily_analytics(listing_ids: list[int], start: date, end: date) -> pd.DataFr
     return df.rename(columns={c: back[c] for c in df.columns if c in back and back[c] not in df.columns})
 
 
-def classified_trades(listing_ids: list[int], start: date, end: date) -> pd.DataFrame:
-    import bmll
+CT_COLS = {"ListingId": "int64", "Date": "datetime64[ns]", "ClassificationName": "string",
+           "ExecutionVenue": "string", "TradeVolume": "float64", "TradeNotionalUSD": "float64"}
 
-    return _rename(
-        _batched(
-            "classified_trades",
-            listing_ids,
-            10,
-            lambda b: bmll.time_series.classified_trades(
+
+def _slim_ct(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only what SIMP uses, with compact numeric types (raw SDK frames are text columns)."""
+    df = _rename(df)
+    out = pd.DataFrame({c: df[c] for c in CT_COLS if c in df.columns})
+    for c in ("ListingId", "TradeVolume", "TradeNotionalUSD"):
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    out["Date"] = pd.to_datetime(out["Date"])
+    return out.astype({c: t for c, t in CT_COLS.items() if c in out.columns and c != "Date"})
+
+
+def classified_trades(listing_ids: list[int], start: date, end: date, dest: Path) -> tuple[int, list[str]]:
+    """Pull per batch (saved, resumable), then stream batches into one Parquet file: the full pull
+    is ~35M rows, too large to hold as one pandas frame on a laptop."""
+    import bmll
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    _batched(
+        "classified_trades",
+        listing_ids,
+        10,
+        lambda b: _slim_ct(
+            bmll.time_series.classified_trades(
                 start_date=start, end_date=end, object_ids=b, object_type="Listing", notional_currency="USD"
-            ),
-        )
+            )
+        ),
+        keep=False,
     )
+    files = sorted(CHUNKS.glob("classified_trades_*.parquet")) if CHUNKS else []
+    wanted = {f.name for f in _chunk_files("classified_trades", listing_ids, 10)}
+    rows, labels, writer = 0, set(), None
+    for f in files:
+        if f.name not in wanted:
+            continue
+        part = _slim_ct(pd.read_parquet(f))
+        labels |= set(part["ClassificationName"].dropna().astype(str).unique())
+        table = pa.Table.from_pandas(part, preserve_index=False)
+        if writer is None:
+            writer = pq.ParquetWriter(dest, table.schema)
+        writer.write_table(table.cast(writer.schema))
+        rows += len(part)
+    if writer is not None:
+        writer.close()
+    return rows, sorted(labels)
 
 
 def estimate_trades_plus(sip_listing_ids: list[int], day: date) -> object:
@@ -404,18 +453,11 @@ def main() -> None:
     )
     sip_ids = sorted(sip["ListingId"].astype(int).unique().tolist())
     print(f"  querying {len(sip_ids)} @SIP listings", flush=True)
-    ct = classified_trades(sip_ids, s, e)
-    ct.to_parquet(out / "classified_trades.parquet")
-    print(f"classified trades: {len(ct)} rows; columns {sorted(ct.columns)}")
-    if len(ct) and "ClassificationName" in ct.columns:
-        print(
-            "  classifications:", sorted(ct["ClassificationName"].astype(str).unique().tolist()), flush=True
-        )
-    if not len(ct):
-        print(
-            "  WARNING: no classified trades returned: check the account's classified-trades entitlement",
-            flush=True,
-        )
+    rows, labels = classified_trades(sip_ids, s, e, out / "classified_trades.parquet")
+    print(f"classified trades: {rows:,} rows written to {out / 'classified_trades.parquet'}", flush=True)
+    print("  classifications:", labels, flush=True)
+    if not rows:
+        print("  WARNING: no classified trades returned: check the account's classified-trades entitlement", flush=True)
     (out / "pull_spec.json").write_text(
         json.dumps({"start": a.start, "end": a.end, "isins": len(isins), "listings": len(lids)})
     )
