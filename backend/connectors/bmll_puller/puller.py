@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -137,19 +137,23 @@ CHUNKS: Path | None = None  # set in main(): <out>/_chunks, one Parquet per fini
 
 def _batched(name: str, items: list, size: int, fetch) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     """Run ``fetch`` per batch with progress output; each finished batch is saved and skipped on restart."""
+    import hashlib
     import time
 
     frames = []
     n = (len(items) + size - 1) // size
     t0 = time.time()
     for k in range(n):
-        f = CHUNKS / f"{name}_{k:04d}.parquet" if CHUNKS else None
+        batch = items[k * size : (k + 1) * size]
+        # keyed by the batch's exact inputs: a run with other dates/ISINs/listings never reuses it
+        key = hashlib.md5(repr(batch).encode()).hexdigest()[:10]
+        f = CHUNKS / f"{name}_{k:04d}_{key}.parquet" if CHUNKS else None
         if f is not None and f.exists():
             frames.append(pd.read_parquet(f))
             print(f"  {name}: batch {k + 1}/{n} already done", flush=True)
             continue
         t = time.time()
-        df = fetch(items[k * size : (k + 1) * size])
+        df = fetch(batch)
         if f is not None:
             df.to_parquet(f)
         frames.append(df)
@@ -203,7 +207,7 @@ def reference_by_isin(isins: list[str], start: date, end: date) -> pd.DataFrame:
     nxt = {d: days[k + 1] for k, d in enumerate(days[:-1])}
     agg["ValidFrom"] = agg["ValidFrom"].where(agg["ValidFrom"] != days[0], date(2015, 1, 1))
     agg["ValidTo"] = [
-        date(9999, 12, 31) if v == days[-1] else nxt[v] - pd.Timedelta(days=1).to_pytimedelta()
+        date(9999, 12, 31) if v >= days[-1] else nxt.get(v, min(d for d in days if d > v)) - timedelta(days=1)
         for v in agg["ValidTo"]
     ]
     last = raw.drop(columns=[c for c in ("Date", "SnapDate") if c in raw.columns]).drop_duplicates(
