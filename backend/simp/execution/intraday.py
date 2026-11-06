@@ -38,19 +38,35 @@ class IntradayService:
         self.md = md
         self._cache: dict[int, np.ndarray] = {}
         self.synthetic = md.data_seed is not None
-        self.live = bool(md.bars)  # live snapshot carrying Trades Plus minute bars
+        # live data with Trades Plus minute bars: in the snapshot, or fetched on demand (T2 runs)
+        self.live = bool(md.bars) or md.bar_loader is not None
+        self._live: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray] | None] = {}
+
+    def bars(self, i: int) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if self.md.bar_loader is None:
+            return self.md.bars.get(i)
+        if i not in self._live:  # small LRU: a long run never holds every session's bars
+            self._live[i] = self.md.bar_loader(i)
+            if len(self._live) > 8:
+                self._live.pop(next(iter(self._live)))
+        return self._live[i]
+
+    def forget(self, i: int) -> None:
+        """Drop session ``i`` from the LRU (after new bars were fetched for it)."""
+        self._live.pop(i, None)
 
     def has_bars(self, i: int, j: int) -> bool:
-        b = self.md.bars.get(i)
+        b = self.bars(i)
         return b is not None and bool(np.isfinite(b[0][j]).any())
 
     def minute_volume(self, i: int, j: int) -> np.ndarray | None:
         """Real addressable volume per minute (live bars), else None (use curve x daily volume)."""
-        return self.md.bars[i][2][j] if self.has_bars(i, j) else None
+        b = self.bars(i)
+        return b[2][j] if b is not None and self.has_bars(i, j) else None
 
     def paths(self, i: int) -> np.ndarray | None:
         if not self.synthetic:
-            b = self.md.bars.get(i)
+            b = self.bars(i)
             return None if b is None else b[0]
         if i not in self._cache:
             md = self.md
@@ -107,7 +123,7 @@ class IntradayService:
         if not self.synthetic:
             if not self.has_bars(i, j):
                 return float(self.md.vwap[i, j]), True
-            _, vw, vol = self.md.bars[i]
+            _, vw, vol = self.bars(i)  # type: ignore[misc]
             v = vol[j, a:b]
             if v.sum() <= 0:
                 return self.price_at(i, j, (a + b) / 2), False

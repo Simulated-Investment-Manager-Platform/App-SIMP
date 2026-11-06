@@ -140,24 +140,28 @@ builds the spec; submit with `bmll.compute.create_job` inside the Lab):
 - **Auction Imbalance:** save it as `lake_staging/bmll/auction_imbalance.parquet` with columns
   `ListingId, Date, ImbalanceSide, ImbalanceQuantity, PairedQuantity, ReferencePrice, IndicativeUncrossingPrice`.
   Without it SIMP still runs, but closing imbalance is zero, so the auction-impact λ term never applies.
-- **Trades Plus `@SIP` (T2 on live data):** pulled with the external SDK, no Lab job. T2 only replays
-  the stocks and days a run traded intraday, so the pull is driven by a T1 run:
-
-  ```bash
-  # backend/: list the (date, ticker) pairs a T1 run's algo orders traded
-  uv run simp data export-t2-needs RUN_ID --out ../lake_staging/t2_needs.csv
-  # backend/connectors/bmll_puller: ticks -> 1-minute bars (resumable; bars accumulate across runs)
-  uv run python puller.py --t2-needs ../../../lake_staging/t2_needs.csv --out ../../../lake_staging/bmll
-  # backend/: register only the bars, then rebuild the snapshot so it carries them
-  uv run simp data register-bmll ../lake_staging/bmll --only trades_plus_minute
-  uv run simp data pull --source live --reuse-crsp --start 2022-03-01 --end 2026-06-30
-  ```
+- **Trades Plus `@SIP` (T2 on live data): automatic.** Nothing to pull up front. When a T2 run on
+  live data reaches a session, it fetches Trades Plus for that day's intraday algo orders that are
+  not cached yet, by running this puller (`--t2-needs`) as a subprocess, and caches 1-minute bars in
+  `lake/bmll/tpm_cache/`. Each (date, name) is fetched once, ever; later runs reuse the cache. If the
+  fund has an earlier finished run, its orders are prefetched in one batch first (stage
+  `fetch_bars`). The run records the hash of every bar file it read (`t2_bars` in the run's data
+  hashes). Requirements for the shell that runs the API and worker: `uv` on PATH and the BMLL
+  variables (`BMLL_KEY_PATH`, `BMLL_USERNAME`, `BMLL_LAB_ORG_ID`) exported or in `backend/.env`.
+  Turn it off with `SIMP_T2_AUTO_FETCH=false`.
 
   Trades Plus is queried by `Ticker` with `MIC="@SIP"` (a `ListingId` filter on @SIP is refused by
   BMLL entitlements). A large-cap name prints ~300k trades a day; the puller keeps 8 columns and
   collapses them to 390 regular-session bars (NBBO mid, lit-continuous + dark VWAP and volume).
-  T2 then caps each minute at 10% of that real volume. Orders on days without bars fall back to
-  daily figures and are flagged `INTRADAY_FALLBACK_DAILY` in the fallback report.
+  T2 caps each minute at 10% of that real volume. Orders BMLL has no bars for fall back to daily
+  figures, flagged `INTRADAY_FALLBACK_DAILY` in the fallback report. The first T2 run over a long
+  window with daily flows is slow (one BMLL query per session); repeats are fast.
+
+  *Manual alternative* (bars baked into the snapshot instead):
+  `simp data export-t2-needs RUN_ID --out ../lake_staging/t2_needs.csv`, then from
+  `connectors/bmll_puller` `uv run python puller.py --t2-needs ../../../lake_staging/t2_needs.csv --out ../../../lake_staging/bmll`,
+  then `simp data register-bmll ../lake_staging/bmll --only trades_plus_minute` and
+  `simp data pull --source live --reuse-crsp ...` to rebuild the snapshot.
 - **T3** (`bmll2.simulation`) only runs inside the Lab. `uv run simp lab t3-job RUN_ID` writes the order list for it.
 
 ## 6. Register the BMLL files
@@ -262,4 +266,5 @@ It checks that `portfolio_nav.csv` is reproduced within $0.01 per day over the 1
 | Run fails `CorporateActionError … unclassified distribution` | Add the CRSP `distype` code to `DISTYPE_MAP` |
 | Run fails `MissingPriceError` | A held name has no CRSP close that session; prices are never forward-filled. Check the pull window or the exclusion |
 | TCA marked *provisional* | Over 1% of notional used a BMLL fallback (auction price from CRSP, or auction volume from the 20-day median). Pull the missing BMLL days |
-| T2 option rejected on live data | The snapshot has no `trades_plus_minute`: follow the Trades Plus steps in section 5, then rebuild the snapshot |
+| T2 option rejected on live data | The API/worker shell cannot fetch bars: `uv` not on PATH or `BMLL_KEY_PATH`/`BMLL_USERNAME` not set (export them or put them in `backend/.env`) |
+| T2 run fails `BMLL Trades Plus fetch failed` | The puller's last lines are in the error; run `uv run python puller.py --check-auth` from `connectors/bmll_puller` |

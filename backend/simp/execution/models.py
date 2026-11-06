@@ -85,10 +85,10 @@ class Executor:
             )
         if model == ExecutionModel.T2 and not intraday.synthetic and not intraday.live:
             raise ExecutionModelUnavailable(
-                "T2 tick replay on live data needs BMLL Trades Plus minute bars in the snapshot: run a T1 "
-                "backtest, `simp data export-t2-needs <run>`, the puller with --t2-needs, "
-                "`simp data register-bmll DIR --only trades_plus_minute`, then `simp data pull --source live "
-                "--reuse-crsp` to rebuild the snapshot."
+                "T2 tick replay on live data needs BMLL Trades Plus minute bars. They are fetched "
+                "automatically during the run when the API/worker has `uv` on PATH, BMLL_KEY_PATH (and "
+                "BMLL_USERNAME) set and the puller at connectors/bmll_puller; otherwise pull them by hand "
+                "(docs/live-data-setup.md, Trades Plus)."
             )
 
     # ------------------------------------------------------------------ helpers

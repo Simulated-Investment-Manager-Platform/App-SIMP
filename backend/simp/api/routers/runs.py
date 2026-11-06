@@ -112,12 +112,18 @@ def check(cfg: dict[str, Any], _: User = Depends(current_user)) -> dict[str, Any
                 "without bars fall back to daily figures, flagged INTRADAY_FALLBACK_DAILY",
             )
         else:
+            from simp.data.t2_bars import available
+
+            ok, why = available()
             add(
                 "execution model",
-                False,
-                "T2 needs BMLL Trades Plus minute bars in the snapshot",
-                "Run T1 first, then: simp data export-t2-needs <run> -> puller.py --t2-needs -> "
-                "simp data register-bmll DIR --only trades_plus_minute -> simp data pull --source live --reuse-crsp",
+                ok,
+                f"T2: {why}"
+                + ("; orders BMLL has no bars for fall back, flagged INTRADAY_FALLBACK_DAILY" if ok else ""),
+                None
+                if ok
+                else "Set BMLL_KEY_PATH / BMLL_USERNAME in the shell that runs the API and worker, "
+                "or pull bars by hand (docs/live-data-setup.md, Trades Plus)",
             )
     else:
         add("execution model", True, f"{c.execution_model} available on {label} data")

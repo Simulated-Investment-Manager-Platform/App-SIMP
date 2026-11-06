@@ -289,3 +289,52 @@ def test_live_t2_replays_trades_plus_minute_bars(tmp_path) -> None:  # type: ign
     assert all(abs(f.price - 100.0) < 5 for f in got)
     fb = ex.execute(i_none, [order(i_none)]).fills
     assert fb and all(f.ref_snapshot["flags"] == ["INTRADAY_FALLBACK_DAILY"] for f in fb)
+
+
+def test_t2_fetches_missing_bars_on_demand(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A T2 run on a live snapshot without bars fetches each session's missing (date, name)
+    pairs through the puller, caches them, replays them, and never fetches a pair twice."""
+    from simp.data.lake.store import Lake
+    from simp.data.market import load_market
+    from simp.data.pull import pull_live, write_raw
+    from simp.data.synthetic.generator import generate
+    from simp.data.t2_bars import BarCache
+    from simp.runs.engine import Engine
+    from tests.conftest import SMALL_END, SMALL_START, cfg
+
+    w = generate(3, SMALL_START, SMALL_END)
+    lake = Lake(tmp_path)
+    write_raw(lake, {k: v for k, v in w.tables.items() if k[0] == "crsp"}, "CRSP", {}, "test")
+    bmll = {k: v for k, v in w.tables.items() if k[0] == "bmll" and k[1] != "auction_imbalance"}
+    write_raw(lake, bmll, "BMLL", {}, "test")
+    snap = pull_live(lake, SMALL_START, SMALL_END, reuse_crsp=True)
+
+    calls: list[int] = []
+
+    def fake_puller(needs: pl.DataFrame, staging, log) -> pl.DataFrame:  # type: ignore[no-untyped-def]
+        calls.append(needs.height)
+        rows = [
+            (int(r["listing_id"]), int(r["permno"]), r["date"], m, 50.0, 50.0, 1e6, 5)
+            for r in needs.iter_rows(named=True)
+            for m in range(390)
+        ]
+        cols = ["ListingId", "permno", "Date", "Minute", "Mid", "Vwap", "Volume", "Trades"]
+        return pl.DataFrame(rows, schema=cols, orient="row")
+
+    def run() -> tuple[BarCache, list]:  # type: ignore[type-arg]
+        md = load_market(snap, str(tmp_path))
+        cache = BarCache(lake, lake.read(snap, "derived", "security_map"),
+                         lake.read(snap, "bmll", "reference_listing"), puller=fake_puller)  # fmt: skip
+        md.bar_loader = cache.loader(md)
+        out = Engine(cfg(execution_model="T2"), md, "r1", bar_cache=cache).run()
+        return cache, out.fills
+
+    cache, fills = run()
+    t2 = [f for f in fills if f.fill_model == "T2_REPLAY"]
+    assert calls and sum(calls) == len(cache.fetched()) and cache.used
+    assert t2 and all(not f.ref_snapshot["flags"] for f in t2)
+    assert all(f.ref_snapshot["interval_volume"] == 1e6 for f in t2)
+    n_calls = len(calls)
+    cache2, fills2 = run()  # same lake: everything is cached now
+    assert len(calls) == n_calls and cache2.audit_hash() == cache.audit_hash()
+    assert [(f.price, f.quantity) for f in fills2] == [(f.price, f.quantity) for f in fills]

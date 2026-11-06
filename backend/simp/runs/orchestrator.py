@@ -183,6 +183,39 @@ def execute_safely(run_id: str) -> None:
         log.error("run.failed", run_id=run_id)
 
 
+# ---------------------------------------------------------------------------- T2 bars
+def _t2_bar_cache(run_id: str, cfg: RunConfig, lake: Lake, snap: str, md: Any) -> Any:
+    """T2 on live data: attach the on-demand Trades Plus bar cache, prefetching (in one batch)
+    the orders of the fund's latest finished run, since most of them recur in this one."""
+    from simp.data import t2_bars
+
+    if str(cfg.execution_model) != "T2" or md.data_label == "SYNTHETIC":
+        return None
+    ok, why = t2_bars.available()
+    if not ok:
+        if md.bars:
+            emit(run_id, "log", {"msg": f"T2: using snapshot bars only ({why})"})
+            return None
+        return None  # the executor refuses T2 with the manual steps
+    cache = t2_bars.BarCache(
+        lake,
+        lake.read(snap, "derived", "security_map"),
+        lake.read(snap, "bmll", "reference_listing"),
+        log=lambda m: emit(run_id, "log", {"msg": m}),
+    )
+    md.bar_loader = cache.loader(md)
+    prior = t2_bars.prior_run(cfg.fund_id, run_id)
+    if prior is not None:
+        pairs = t2_bars.run_pairs(prior)
+        _set(run_id, stage="fetch_bars")
+        emit(run_id, "stage", {"stage": "fetch_bars"})
+        n = cache.ensure(pairs)
+        emit(run_id, "log", {"msg": f"T2: prefetch from run {prior}: {n} new (date, name) pairs fetched"})
+        _set(run_id, stage="simulate")
+        emit(run_id, "stage", {"stage": "simulate"})
+    return cache
+
+
 # ---------------------------------------------------------------------------- execute
 def execute(run_id: str) -> str:
     structlog.contextvars.bind_contextvars(run_id=run_id)
@@ -226,8 +259,14 @@ def execute(run_id: str) -> str:
                 _set(run_id, progress=frac)
                 emit(run_id, "progress", p)
 
-        eng = Engine(cfg, md, run_id, progress=progress, ca_reviews=reviews, policy=policy)
+        bar_cache = _t2_bar_cache(run_id, cfg, lake, snap, md)
+        eng = Engine(
+            cfg, md, run_id, progress=progress, ca_reviews=reviews, policy=policy, bar_cache=bar_cache
+        )
         out = eng.run()
+        if bar_cache is not None:
+            hashes |= {"t2_bars": bar_cache.audit_hash(), "t2_bar_files": str(len(bar_cache.used))}
+            _set(run_id, data_snapshot_hashes=hashes)
         t_sim = time.time() - t0
         _set(run_id, status=RunStatus.ANALYSING, stage="analyse", progress=1.0)
         emit(run_id, "stage", {"stage": "analyse", "sim_seconds": round(t_sim, 2)})

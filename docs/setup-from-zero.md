@@ -211,8 +211,8 @@ then prints the row counts and columns.
 Optional Data Lab datasets go in the same folder. Run them as Data Lab jobs; `lab_job_spec()` in `puller.py` builds
 the spec:
 - `auction_imbalance.parquet`: closing imbalance detail. Without it, imbalance is treated as zero.
-- Trades Plus `@SIP`: required for the **T2** execution model on live data. This one is *not* a
-  Lab job: see "Trades Plus `@SIP` (T2 on live data)" in `docs/live-data-setup.md` section 5.
+- Trades Plus `@SIP`: required for the **T2** execution model on live data. Nothing to pull:
+  T2 runs fetch and cache the bars they need automatically (see `docs/live-data-setup.md` section 5).
 
 ### 5.4 Register BMLL and (optionally) the official S&P 500 TR
 

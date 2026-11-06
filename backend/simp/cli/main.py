@@ -135,54 +135,20 @@ def register_bmll(
         typer.echo(f"{ds}: {m.row_count} rows, manifest {m.content_hash()[:12]}")
 
 
-T2_INTRADAY_STRATEGIES = ("HIGH_TOUCH", "ALGO_VWAP", "ALGO_TWAP", "ALGO_POV", "ALGO_IS")
-
-
 def t2_needs(run_id: str) -> Any:
     """(date, permno) of a run's intraday orders, with the BMLL @SIP ticker to query Trades Plus by."""
-    import polars as pl
-    from sqlalchemy import text
-
-    from simp.accounting.calendar import NY
     from simp.data.lake.store import Lake
     from simp.data.pull import _latest
-    from simp.db.session import get_engine
+    from simp.data.t2_bars import resolve_needs, run_pairs
 
-    with get_engine().connect() as c:
-        rows = c.execute(
-            text(
-                "select distinct p.permno, t.start_ts from trader_order t join pm_order p "
-                "on p.pm_order_id = t.pm_order_id where t.run_id = :r and t.strategy = any(:s)"
-            ),
-            {"r": run_id, "s": list(T2_INTRADAY_STRATEGIES)},
-        ).all()
-    if not rows:
+    pairs = run_pairs(run_id)
+    if not pairs.height:
         raise typer.BadParameter(f"run {run_id} has no intraday (algo / high-touch) orders")
-    needs = pl.DataFrame(
-        {"permno": [int(p) for p, _ in rows], "date": [ts.astimezone(NY).date() for _, ts in rows]}
-    ).unique()
     lake = Lake()
     smap, ref = _latest(lake, "derived", "security_map"), _latest(lake, "bmll", "reference_listing")
     if smap is None or ref is None:
         raise typer.BadParameter("no live snapshot in the lake: run `simp data pull --source live` first")
-    j = needs.join(
-        smap.select("permno", "listing_id", "sip_listing_id", "valid_from", "valid_to"), on="permno"
-    )
-    j = j.filter((pl.col("date") >= pl.col("valid_from")) & (pl.col("date") <= pl.col("valid_to")))
-    sip = ref.filter(pl.col("MIC") == "@SIP").select(
-        pl.col("ListingId").cast(pl.Int64).alias("sip_listing_id"),
-        pl.col("Ticker").alias("ticker"),
-        pl.col("ValidFrom").alias("tf"),
-        pl.col("ValidTo").alias("tt"),
-    )
-    j = j.join(sip, on="sip_listing_id", how="left").filter(
-        pl.col("ticker").is_null() | ((pl.col("date") >= pl.col("tf")) & (pl.col("date") <= pl.col("tt")))
-    )
-    return (
-        j.select("date", "permno", "listing_id", "sip_listing_id", "ticker")
-        .unique(["date", "permno"], keep="first")
-        .sort("date", "ticker")
-    )
+    return resolve_needs(pairs, smap, ref).sort("date", "ticker")
 
 
 @data_app.command("export-t2-needs")

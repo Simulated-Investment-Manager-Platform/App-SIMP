@@ -46,6 +46,9 @@ class Settings(BaseSettings):
 
     # BMLL SDK (outside the Lab) authenticates with an SSH key.
     bmll_key_path: Path | None = Field(default=None, validation_alias="BMLL_KEY_PATH")
+    # T2 on live data: fetch missing Trades Plus minute bars during a run with the isolated puller.
+    t2_auto_fetch: bool = True
+    bmll_puller_dir: Path = Path(__file__).resolve().parents[1] / "connectors" / "bmll_puller"
 
     def allowed_user_roles(self) -> dict[str, str]:
         out: dict[str, str] = {}

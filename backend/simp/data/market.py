@@ -6,6 +6,7 @@ and a look-ahead guard (``MarketData.guard``) rejects any read dated after the d
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from functools import lru_cache
@@ -124,6 +125,8 @@ class MarketData:
     # Live T2: Trades Plus minute bars per session index -> (mid, vwap, volume), each (N, 390);
     # rows of names without bars that day are NaN mid / zero volume.
     bars: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = field(default_factory=dict)
+    # T2 runs on live data: session index -> bars from the on-demand Trades Plus cache (or None)
+    bar_loader: Callable[[int], tuple[np.ndarray, np.ndarray, np.ndarray] | None] | None = None
     _horizon: int | None = None
 
     @property
@@ -344,16 +347,22 @@ def _load_bars(
 ) -> dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     if "bmll/trades_plus_minute" not in lake.snapshot(snapshot)["manifests"]:
         return {}
-    df = lake.read(snapshot, "bmll", "trades_plus_minute").filter(
-        pl.col("Date").is_in(list(dpos)) & pl.col("permno").is_in(list(pos))
-    )
-    out: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    df = lake.read(snapshot, "bmll", "trades_plus_minute")
+    return {dpos[d]: arr for d, arr in bars_from_frame(df, pos).items() if d in dpos}
+
+
+def bars_from_frame(
+    df: pl.DataFrame, pos: dict[int, int]
+) -> dict[date, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """trades_plus_minute rows -> per date (mid, vwap, volume) arrays of shape (N, 390)."""
+    df = df.filter(pl.col("permno").is_in(list(pos)))
+    out: dict[date, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     n = len(pos)
     for (d,), part in df.group_by(["Date"]):
         mid = np.full((n, N_BAR_MINUTES), np.nan)
         vwap = np.full((n, N_BAR_MINUTES), np.nan)
         vol = np.zeros((n, N_BAR_MINUTES))
-        j = np.array([pos[int(p)] for p in part["permno"].to_list()])
+        j = np.array([pos[int(p)] for p in part["permno"].to_list()], dtype=int)
         m = part["Minute"].to_numpy().astype(int)
         ok = (m >= 0) & (m < N_BAR_MINUTES)
         j, m = j[ok], m[ok]
@@ -370,5 +379,5 @@ def _load_bars(
                 filled[: first[0]] = row[first[0]]
             mid[jj] = filled
             vwap[jj] = np.where(np.isfinite(vwap[jj]), vwap[jj], mid[jj])
-        out[dpos[d]] = (mid, vwap, vol)
+        out[d] = (mid, vwap, vol)
     return out

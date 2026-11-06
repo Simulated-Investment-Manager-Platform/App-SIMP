@@ -28,6 +28,7 @@ from simp.accounting.flows import FlowProcess
 from simp.accounting.ledger import Ledger
 from simp.config.run_config import RunConfig, check_release
 from simp.data.market import MarketData
+from simp.data.t2_bars import BarCache
 from simp.desk.policy import DeskPolicy, OrderContext, apply_spill_cap, load_policy, plan_order
 from simp.desk.reference import BROKERS
 from simp.domain.enums import FundType, Reason, Strategy, TraderStatus, side_sign
@@ -83,8 +84,10 @@ class Engine:
         progress: ProgressFn | None = None,
         ca_reviews: dict[tuple[int, str, str], str] | None = None,
         policy: DeskPolicy | None = None,
+        bar_cache: BarCache | None = None,
     ) -> None:
         self.cfg, self.md, self.run_id = cfg, md, run_id
+        self.bar_cache = bar_cache  # T2 on live data: fetch missing Trades Plus bars per session
         cal = md.cal
         check_release(cfg.window, md.sessions[0], md.sessions[-1])
         self.i0 = cal.index(cal.on_or_after(cfg.window.bootstrap))
@@ -555,6 +558,26 @@ class Engine:
         return proceeds
 
     # ------------------------------------------------------------------ main loop
+    def _ensure_bars(self, i: int, traders: list[TraderOrder]) -> None:
+        """Before T2 executes a session, fetch bars for that day's intraday orders the cache lacks."""
+        import polars as pl
+
+        from simp.data.t2_bars import INTRADAY_STRATEGIES
+
+        assert self.bar_cache is not None  # noqa: S101 - caller checks
+        md = self.md
+        want = sorted(
+            {
+                o.permno
+                for o in traders
+                if o.strategy in INTRADAY_STRATEGIES and not self.intra.has_bars(i, md.pos[o.permno])
+            }
+        )
+        if want and self.bar_cache.ensure(
+            pl.DataFrame({"date": [md.sessions[i]] * len(want), "permno": want})
+        ):
+            self.intra.forget(i)
+
     def run(self) -> EngineOutput:
         md, cfg = self.md, self.cfg
         prev_close = np.where(np.isfinite(md.prc[self.i0]), md.prc[self.i0], 0.0)
@@ -597,6 +620,8 @@ class Engine:
             pm_by_id = {o.pm_order_id: o for o in todays}
             traders = self._desk(i, todays) if todays else []
             # 4-5. execution
+            if self.bar_cache is not None and traders:
+                self._ensure_bars(i, traders)
             res = self.executor.execute(i, traders)
             self.children += res.children
             self.fills += res.fills
