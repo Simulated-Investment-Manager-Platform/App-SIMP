@@ -252,10 +252,13 @@ def resolve_metrics(listing_id: int, out: Path) -> dict[str, str]:
     if "frequency" in av.columns:
         daily = av[av["frequency"].astype(str).str.upper().isin(["D", "DAILY", "1D"])]
         av = daily if len(daily) else av
-    name_col = next(
-        (c for c in ("metric", "Metric", "name", "metric_name") if c in av.columns), av.columns[0]
-    )
-    names = sorted({str(x) for x in av[name_col].dropna()}, key=len)
+    # Metrics are base names with variants in a ``suffix`` column; the service is queried with the
+    # base name and returns one column per variant, named "<metric>|<suffix>".
+    if {"metric", "suffix"} <= set(av.columns):
+        full = [f"{m}|{x}" if isinstance(x, str) and x and x.lower() != "nan" else str(m) for m, x in zip(av["metric"], av["suffix"])]
+    else:
+        full = [str(x) for x in av[av.columns[0]]]
+    names = sorted(set(full), key=len)
     override = out / "metric_map.json"
     manual = json.loads(override.read_text()) if override.exists() else {}
     resolved: dict[str, str] = {}
@@ -291,7 +294,7 @@ def resolve_metrics(listing_id: int, out: Path) -> dict[str, str]:
 def daily_analytics(listing_ids: list[int], start: date, end: date) -> pd.DataFrame:
     import bmll
 
-    metrics = sorted(set(METRIC_MAP.values()))
+    metrics = sorted({name.split("|")[0] for name in METRIC_MAP.values()})  # query base names
     if not metrics:
         raise SystemExit("none of SIMP's daily metrics are available for this account")
     import hashlib
