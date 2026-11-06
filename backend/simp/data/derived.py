@@ -31,6 +31,27 @@ def _primary_by_permno_date(smap: pl.DataFrame, dsf: pl.DataFrame) -> pl.DataFra
     )
 
 
+# BMLL ClassificationName -> SIMP bucket (labels seen in a live US @SIP pull). Anything else is
+# bucketed by keywords; pre-open / post-trade prints are never counted as regular-session volume.
+BMLL_CLASSES = {
+    "LIT_CLOSING_AUCTION": "AUC_CLOSE",
+    "LIT_OPENING_AUCTION": "AUC_OPEN",
+    "LIT_CONTINUOUS": "CONTINUOUS",
+    "DARK": "DARK",
+    "DARK_ABOVE_LIS": "DARK",
+    "DARK_BELOW_LIS": "DARK",
+    "LIT_PRE_OPEN": "OTHER",
+    "PRE_OPEN_AUCTION": "OTHER",
+    "LIT_POST_TRADE": "OTHER",
+    "LIT_UNSCHEDULED_AUCTION": "OTHER",
+    "AUCTION_ON_DEMAND": "OTHER",
+    "CLOSING_PRICE": "OTHER",
+    "BENCHMARK_PRICE": "OTHER",
+    "SPECIAL_PRICE": "OTHER",
+    "OTC": "OTHER",
+}
+
+
 def classified(ct: pl.DataFrame, smap: pl.DataFrame) -> pl.DataFrame:
     """Normalise classified trades: rows on the @SIP listing (where US trade data lives) are moved
     to the primary listing, and BMLL classification labels are bucketed whatever their spelling:
@@ -39,10 +60,14 @@ def classified(ct: pl.DataFrame, smap: pl.DataFrame) -> pl.DataFrame:
         int(s): int(p)
         for s, p in smap.select("sip_listing_id", "listing_id").drop_nulls().unique().iter_rows()
     }
-    n = pl.col("ClassificationName").cast(pl.Utf8).str.to_uppercase().str.replace_all(r"[^A-Z]", "")
+    label = pl.col("ClassificationName").cast(pl.Utf8).str.to_uppercase()
+    n = label.str.replace_all(r"[^A-Z]", "")
     auction = n.str.contains("AUCTION")
-    cls = (
-        pl.when(n.str.contains("CLOS") & auction)
+    session_edge = n.str.contains("PRE") | n.str.contains("POST")  # pre-open / post-trade prints
+    fallback = (
+        pl.when(session_edge)
+        .then(pl.lit("OTHER"))
+        .when(n.str.contains("CLOS") & auction)
         .then(pl.lit("AUC_CLOSE"))
         .when(n.str.contains("OPEN") & auction)
         .then(pl.lit("AUC_OPEN"))
@@ -52,6 +77,7 @@ def classified(ct: pl.DataFrame, smap: pl.DataFrame) -> pl.DataFrame:
         .then(pl.lit("CONTINUOUS"))
         .otherwise(pl.lit("OTHER"))
     )
+    cls = label.replace_strict(BMLL_CLASSES, default=fallback, return_dtype=pl.Utf8)
     return ct.with_columns(
         pl.col("ListingId")
         .replace_strict(sip, default=pl.col("ListingId"), return_dtype=pl.Int64)

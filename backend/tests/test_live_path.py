@@ -100,3 +100,42 @@ def test_classified_trades_on_sip_listing_map_to_primary() -> None:
     out = classified(conform(raw, c), smap)
     assert out["ListingId"].unique().to_list() == [100]
     assert sorted(out["cls"].to_list()) == ["AUC_CLOSE", "CONTINUOUS", "CONTINUOUS", "OTHER"]
+
+
+def test_bmll_classification_labels() -> None:
+    from simp.data.derived import classified
+
+    labels = [
+        "AUCTION_ON_DEMAND",
+        "BENCHMARK_PRICE",
+        "CLOSING_PRICE",
+        "DARK_ABOVE_LIS",
+        "DARK_BELOW_LIS",
+        "LIT_CLOSING_AUCTION",
+        "LIT_CONTINUOUS",
+        "LIT_OPENING_AUCTION",
+        "LIT_POST_TRADE",
+        "LIT_PRE_OPEN",
+        "LIT_UNSCHEDULED_AUCTION",
+        "OTC",
+        "PRE_OPEN_AUCTION",
+        "SPECIAL_PRICE",
+        "Some_New_Dark_Pool",
+    ]
+    ct = pl.DataFrame({"ListingId": [1] * len(labels), "ClassificationName": labels})
+    got = dict(
+        zip(
+            labels,
+            classified(ct, pl.DataFrame({"listing_id": [1], "sip_listing_id": [9]}))["cls"],
+            strict=True,
+        )
+    )
+    assert got["LIT_CLOSING_AUCTION"] == "AUC_CLOSE" and got["LIT_OPENING_AUCTION"] == "AUC_OPEN"
+    assert (
+        got["LIT_CONTINUOUS"] == "CONTINUOUS"
+        and got["DARK_BELOW_LIS"] == "DARK"
+        and got["Some_New_Dark_Pool"] == "DARK"
+    )
+    assert {
+        got[x] for x in ("LIT_PRE_OPEN", "LIT_POST_TRADE", "PRE_OPEN_AUCTION", "CLOSING_PRICE", "OTC")
+    } == {"OTHER"}
