@@ -236,7 +236,7 @@ METRIC_WANTS: dict[str, list[list[str]]] = {
     "AuctionOrderImbalance|Abs": [["imbalance", "abs"], ["imbalance", "quantity"]],
     "AuctionOrderImbalance|Notional": [["imbalance", "notional"]],
     "AuctionDislocation|ClosingLast": [["dislocation", "clos"]],
-    "Volume": [["volume", "total"], ["volume"]],
+    # Daily volume is taken from classified trades (addressable volume), not from daily analytics.
 }
 METRIC_MAP: dict[str, str] = {}  # resolved: SIMP field -> BMLL metric name
 
