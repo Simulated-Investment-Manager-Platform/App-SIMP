@@ -139,3 +139,45 @@ def test_bmll_classification_labels() -> None:
     assert {
         got[x] for x in ("LIT_PRE_OPEN", "LIT_POST_TRADE", "PRE_OPEN_AUCTION", "CLOSING_PRICE", "OTC")
     } == {"OTHER"}
+
+
+def test_mapping_with_missing_cusip9() -> None:
+    """Real CRSP intervals can lack cusip9 (use cusip + check digit) or both CUSIPs (review queue)."""
+    from simp.data.mapping.builder import build_security_map
+
+    secinfo = pl.DataFrame(
+        {
+            "permno": [1, 2],
+            "secinfostartdt": [date(2020, 1, 1)] * 2,
+            "secinfoenddt": [date(9999, 12, 31)] * 2,
+            "ticker": ["AAPL", "ZZZ"],
+            "cusip": ["03783310", None],
+            "cusip9": [None, None],
+            "primaryexch": ["Q", "N"],
+        }
+    )
+    ref = pl.DataFrame(
+        {
+            "ListingId": [10, 11],
+            "InstrumentId": [5, 5],
+            "ISIN": ["US0378331005", "US0378331005"],
+            "FIGI": ["F", "F"],
+            "Ticker": ["AAPL", "AAPL"],
+            "MIC": ["XNAS", "@SIP"],
+            "OPOL": ["XNAS", "XNAS"],
+            "IsPrimary": [True, False],
+            "ValidFrom": [date(2015, 1, 1)] * 2,
+            "ValidTo": [date(9999, 12, 31)] * 2,
+        }
+    )
+    empty_px = pl.DataFrame(schema={"permno": pl.Int64, "dlycaldt": pl.Date, "dlyprc": pl.Float64})
+    res = build_security_map(
+        secinfo,
+        ref,
+        empty_px,
+        pl.DataFrame(schema={"ListingId": pl.Int64, "Date": pl.Date, "close": pl.Float64}),
+    )
+    assert res.security_map["permno"].to_list() == [1] and res.security_map["sip_listing_id"].to_list() == [
+        11
+    ]
+    assert res.review_queue["permno"].to_list() == [2]

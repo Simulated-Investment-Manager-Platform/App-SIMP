@@ -137,12 +137,14 @@ def export_isins(out: Path = typer.Option(Path("isins.csv"))) -> None:
         raise typer.BadParameter(
             "no CRSP pull in the lake: run `simp data pull --source live --crsp-only` first"
         )
-    si = pl.read_parquet([str(lake.root / f) for f in m["files"]]).drop_nulls("cusip9")
-    rows = [
-        {"permno": p, "ticker": t, "isin": isin_from_cusip9(c), "primaryexch": x}
-        for p, t, c, x in si.select("permno", "ticker", "cusip9", "primaryexch").iter_rows()
-        if c and len(c) == 9
-    ]
+    from simp.data.mapping.isin import cusip9_of
+
+    si = pl.read_parquet([str(lake.root / f) for f in m["files"]])
+    rows = []
+    for p, t, c9, c8, x in si.select("permno", "ticker", "cusip9", "cusip", "primaryexch").iter_rows():
+        c = cusip9_of(c9, c8)
+        if c:
+            rows.append({"permno": p, "ticker": t, "isin": isin_from_cusip9(c), "primaryexch": x})
     pl.DataFrame(rows).unique("isin").write_csv(out)
     typer.echo(f"wrote {out} ({len(rows)} ISIN rows)")
 

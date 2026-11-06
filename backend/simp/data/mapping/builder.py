@@ -14,7 +14,7 @@ from datetime import date
 
 import polars as pl
 
-from simp.data.mapping.isin import exch_to_mic, isin_from_cusip9
+from simp.data.mapping.isin import cusip9_of, exch_to_mic, isin_from_cusip9
 from simp.errors import MappingError
 
 OPEN_END = date(9999, 12, 31)
@@ -75,9 +75,10 @@ def build_security_map(
         permno = int(s["permno"])
         if universe is not None and permno not in universe:
             continue
-        isin = isin_from_cusip9(s["cusip9"])
+        c9 = cusip9_of(s.get("cusip9"), s.get("cusip"))
+        isin = isin_from_cusip9(c9) if c9 else None  # no CUSIP: ticker fallback / review queue only
         s0, s1 = s["secinfostartdt"], s["secinfoenddt"] or OPEN_END
-        cands = [(r, "ISIN", 1.0) for r in by_isin.get(isin, [])]
+        cands = [(r, "ISIN", 1.0) for r in by_isin.get(isin, [])] if isin else []
         if not cands:
             for r in by_ticker.get(s["ticker"], []):
                 if r["OPOL"] != exch_to_mic(s["primaryexch"]):
@@ -112,7 +113,7 @@ def build_security_map(
                     listing_id=int(r["ListingId"]),  # type: ignore[call-overload]
                     instrument_id=int(r["InstrumentId"]),  # type: ignore[call-overload]
                     sip_listing_id=int(sips[0]["SipListingId"]) if sips else None,  # type: ignore[call-overload]
-                    isin=str(r["ISIN"] or isin),
+                    isin=str(r["ISIN"] or isin or ""),
                     figi=r["FIGI"],
                     ticker=s["ticker"],
                     opol=r["OPOL"],
