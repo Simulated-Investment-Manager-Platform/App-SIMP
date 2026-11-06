@@ -79,3 +79,24 @@ def test_wrds_distributions_with_shared_ex_date_and_type() -> None:
     out2 = conform(same_seq, c)
     check_contract(out2, c)
     assert out2.height == 2 and out2["disseqnbr"].n_unique() == 2
+
+
+def test_classified_trades_on_sip_listing_map_to_primary() -> None:
+    """US classified trades come on the @SIP listing with BMLL's own labels and a Shares column."""
+    from simp.data.derived import classified
+
+    smap = pl.DataFrame({"permno": [1], "listing_id": [100], "sip_listing_id": [900]})
+    raw = pl.DataFrame(
+        {
+            "Date": [date(2025, 3, 21)] * 4,
+            "ListingId": ["900"] * 4,
+            "ExecutionVenue": ["XNAS", "XNAS", "BATS", "FINR"],
+            "ClassificationName": ["Lit Closing Auction", "Lit Continuous", "LIT_CONTINUOUS", "Off Book"],
+            "Shares": ["1000", "500", "300", "200"],
+            "TradeNotionalUSD": ["100000", "50000", "30000", "20000"],
+        }
+    ).rename({"Shares": "TradeVolume"})
+    c = CONTRACTS[("bmll", "classified_trades")]
+    out = classified(conform(raw, c), smap)
+    assert out["ListingId"].unique().to_list() == [100]
+    assert sorted(out["cls"].to_list()) == ["AUC_CLOSE", "CONTINUOUS", "CONTINUOUS", "OTHER"]

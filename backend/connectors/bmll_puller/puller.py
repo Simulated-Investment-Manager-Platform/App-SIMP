@@ -64,6 +64,7 @@ RENAME = {
     "Volume": "TradeVolume",
     "NotionalUSD": "TradeNotionalUSD",
     "Notional": "TradeNotionalUSD",
+    "Shares": "TradeVolume",
     "Opol": "OPOL",
     "StartDate": "ValidFrom",
     "EndDate": "ValidTo",
@@ -255,7 +256,10 @@ def resolve_metrics(listing_id: int, out: Path) -> dict[str, str]:
     # Metrics are base names with variants in a ``suffix`` column; the service is queried with the
     # base name and returns one column per variant, named "<metric>|<suffix>".
     if {"metric", "suffix"} <= set(av.columns):
-        full = [f"{m}|{x}" if isinstance(x, str) and x and x.lower() != "nan" else str(m) for m, x in zip(av["metric"], av["suffix"])]
+        full = [
+            f"{m}|{x}" if isinstance(x, str) and x and x.lower() != "nan" else str(m)
+            for m, x in zip(av["metric"], av["suffix"])
+        ]
     else:
         full = [str(x) for x in av[av.columns[0]]]
     names = sorted(set(full), key=len)
@@ -320,7 +324,7 @@ def classified_trades(listing_ids: list[int], start: date, end: date) -> pd.Data
         _batched(
             "classified_trades",
             listing_ids,
-            25,
+            10,
             lambda b: bmll.time_series.classified_trades(
                 start_date=start, end_date=end, object_ids=b, object_type="Listing", notional_currency="USD"
             ),
@@ -391,9 +395,27 @@ def main() -> None:
     da.to_parquet(out / "daily_analytics.parquet")
     print(f"daily analytics: {len(da)} rows; columns {sorted(da.columns)}")
     print("3/3 classified trades", flush=True)
-    ct = classified_trades(lids, s, e)
+    # US trade data (and so classified trades) lives on the @SIP listing; the real venue is in
+    # ExecutionVenue. SIMP maps @SIP rows back to the primary listing when it builds market_daily.
+    sip = (
+        ref[(ref["MIC"] == "@SIP") & ref["InstrumentId"].isin(prim["InstrumentId"])]
+        if "InstrumentId" in ref.columns
+        else ref[ref["MIC"] == "@SIP"]
+    )
+    sip_ids = sorted(sip["ListingId"].astype(int).unique().tolist())
+    print(f"  querying {len(sip_ids)} @SIP listings", flush=True)
+    ct = classified_trades(sip_ids, s, e)
     ct.to_parquet(out / "classified_trades.parquet")
     print(f"classified trades: {len(ct)} rows; columns {sorted(ct.columns)}")
+    if len(ct) and "ClassificationName" in ct.columns:
+        print(
+            "  classifications:", sorted(ct["ClassificationName"].astype(str).unique().tolist()), flush=True
+        )
+    if not len(ct):
+        print(
+            "  WARNING: no classified trades returned: check the account's classified-trades entitlement",
+            flush=True,
+        )
     (out / "pull_spec.json").write_text(
         json.dumps({"start": a.start, "end": a.end, "isins": len(isins), "listings": len(lids)})
     )

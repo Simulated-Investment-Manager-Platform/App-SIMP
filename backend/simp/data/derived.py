@@ -31,15 +31,44 @@ def _primary_by_permno_date(smap: pl.DataFrame, dsf: pl.DataFrame) -> pl.DataFra
     )
 
 
+def classified(ct: pl.DataFrame, smap: pl.DataFrame) -> pl.DataFrame:
+    """Normalise classified trades: rows on the @SIP listing (where US trade data lives) are moved
+    to the primary listing, and BMLL classification labels are bucketed whatever their spelling:
+    AUC_CLOSE, AUC_OPEN, CONTINUOUS (lit), DARK or OTHER (off-book etc., not addressable)."""
+    sip = {
+        int(s): int(p)
+        for s, p in smap.select("sip_listing_id", "listing_id").drop_nulls().unique().iter_rows()
+    }
+    n = pl.col("ClassificationName").cast(pl.Utf8).str.to_uppercase().str.replace_all(r"[^A-Z]", "")
+    auction = n.str.contains("AUCTION")
+    cls = (
+        pl.when(n.str.contains("CLOS") & auction)
+        .then(pl.lit("AUC_CLOSE"))
+        .when(n.str.contains("OPEN") & auction)
+        .then(pl.lit("AUC_OPEN"))
+        .when(n.str.contains("DARK"))
+        .then(pl.lit("DARK"))
+        .when(n.str.contains("LIT") & ~auction)
+        .then(pl.lit("CONTINUOUS"))
+        .otherwise(pl.lit("OTHER"))
+    )
+    return ct.with_columns(
+        pl.col("ListingId")
+        .replace_strict(sip, default=pl.col("ListingId"), return_dtype=pl.Int64)
+        .alias("ListingId"),
+        cls.alias("cls"),
+    )
+
+
 def build_market_daily(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFrame) -> pl.DataFrame:
     dsf = raw[("crsp", "dsf_v2")]
     da = raw[("bmll", "daily_analytics")]
-    ct = raw[("bmll", "classified_trades")]
+    ct = classified(raw[("bmll", "classified_trades")], smap)
     imb = raw[("bmll", "auction_imbalance")]
     keys = _primary_by_permno_date(smap, dsf)
 
     auc = (
-        ct.filter(pl.col("ClassificationName") == "LIT_CLOSING_AUCTION")
+        ct.filter(pl.col("cls") == "AUC_CLOSE")
         .group_by("ListingId", "Date")
         .agg(
             pl.col("TradeVolume").sum().alias("auction_volume_raw"),
@@ -47,11 +76,7 @@ def build_market_daily(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFr
         )
     )
     addressable = (
-        ct.filter(
-            pl.col("ClassificationName").is_in(
-                ["LIT_CONTINUOUS", "LIT_CLOSING_AUCTION", "LIT_OPENING_AUCTION", "DARK"]
-            )
-        )
+        ct.filter(pl.col("cls").is_in(["CONTINUOUS", "AUC_CLOSE", "AUC_OPEN", "DARK"]))
         .group_by("ListingId", "Date")
         .agg(pl.col("TradeVolume").sum().alias("addr_volume"))
     )
@@ -121,8 +146,14 @@ def build_market_daily(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFr
 
 
 def build_venue_share(raw: dict[tuple[str, str], pl.DataFrame], smap: pl.DataFrame) -> pl.DataFrame:
-    ct = raw[("bmll", "classified_trades")].filter(
-        pl.col("ClassificationName").is_in(["LIT_CONTINUOUS", "DARK"])
+    ct = classified(raw[("bmll", "classified_trades")], smap).filter(
+        pl.col("cls").is_in(["CONTINUOUS", "DARK"])
+    )
+    ct = ct.with_columns(
+        pl.when(pl.col("cls") == "DARK")
+        .then(pl.lit("DARK"))
+        .otherwise(pl.col("ExecutionVenue"))
+        .alias("ExecutionVenue")
     )
     lid = smap.select("permno", pl.col("listing_id").alias("ListingId")).unique()
     v = (
