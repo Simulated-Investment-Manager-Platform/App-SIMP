@@ -11,7 +11,8 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Any, cast
 
-from sqlalchemy import Engine, Table, create_engine, insert
+from sqlalchemy import Engine, Table, create_engine, insert, text
+from sqlalchemy.exc import ProgrammingError
 
 from simp.settings import get_settings
 
@@ -19,6 +20,36 @@ from simp.settings import get_settings
 @lru_cache(maxsize=4)
 def get_engine(url: str | None = None) -> Engine:
     return create_engine(url or get_settings().database_url, pool_pre_ping=True, future=True)
+
+
+def migration_head() -> str:
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).parents[2]
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    return str(head)
+
+
+def require_schema_at_head(engine: Engine) -> None:
+    """Fail fast (with the fix) when the code is newer than the database schema."""
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.connect() as c:
+        try:
+            cur = c.execute(text("select version_num from alembic_version")).scalar()
+        except ProgrammingError:  # schema built without Alembic (tests): nothing to compare
+            return
+    head = migration_head()
+    if cur != head:
+        raise RuntimeError(
+            f"database schema is at revision {cur!r} but the code expects {head!r}. "
+            "Run `uv run simp db upgrade` (from backend/), then re-run this command."
+        )
 
 
 def _cell(v: Any) -> str:

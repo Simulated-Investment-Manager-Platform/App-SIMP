@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from simp.data.lake.store import Lake
 from simp.data.market import classify_distribution
 from simp.db import schema as S
-from simp.db.session import get_engine
+from simp.db.session import get_engine, require_schema_at_head
 from simp.desk.policy import POLICY_DIR
 from simp.desk.reference import BROKERS, DESKS, VENUES
 from simp.settings import get_settings
@@ -115,6 +115,7 @@ def seed_reviews(snapshot: str, engine: Engine | None = None) -> dict[str, int]:
     """Corporate-action review queue (ported from the notebook's decision CSVs) and the
     BMLL mapping review queue. Existing review decisions are never overwritten."""
     eng = engine or get_engine()
+    require_schema_at_head(eng)
     lake = Lake()
     dist = lake.read(snapshot, "crsp", "stkdistributions")
     auto = {"CD": "APPROVED", "FS": "APPROVED", "SO": "APPROVED", "RI": "PENDING", "MG": "UNSUPPORTED"}
