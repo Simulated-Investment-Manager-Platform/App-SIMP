@@ -843,6 +843,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/securities/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Default Security
+         * @description The security the market explorer opens on: the largest index member on the last session
+         *     of the latest snapshot (PERMNOs differ between synthetic and live data).
+         */
+        get: operations["default_security_api_securities_default_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/securities/{permno}/market": {
         parameters: {
             query?: never;
@@ -2841,6 +2862,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    default_security_api_securities_default_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

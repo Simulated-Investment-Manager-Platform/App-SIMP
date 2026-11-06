@@ -234,7 +234,8 @@ def load_market(snapshot: str, lake_root: str | None = None) -> MarketData:
             mapped[pos[int(p)]] = True
 
     secinfo = lake.read(snapshot, "crsp", "stksecurityinfohist").sort("secinfostartdt")
-    tick = {int(p): t for p, t in secinfo.select("permno", "ticker").iter_rows()}
+    # latest non-empty ticker (CIZ leaves it null on post-delisting rows)
+    tick = {int(p): t for p, t in secinfo.select("permno", "ticker").iter_rows() if t}
     # latest listing venue the desk can route to; CIZ marks delisted rows "X" (not listed)
     prim: dict[int, str] = {}
     for p, e in secinfo.select("permno", "primaryexch").iter_rows():

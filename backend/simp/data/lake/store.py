@@ -2,20 +2,26 @@
 
 Layout::
 
-    lake/{source}/{dataset}/date=YYYY-MM-DD/part-0.parquet   (daily datasets)
-    lake/{source}/{dataset}/static/part-0.parquet             (reference datasets)
+    lake/{source}/{dataset}/pull={pull_id}/date=YYYY-MM-DD/part-0.parquet   (daily datasets)
+    lake/{source}/{dataset}/pull={pull_id}/static/part-0.parquet             (reference datasets)
     lake/_manifests/{source}/{dataset}/{manifest_hash}.json
     lake/_snapshots/{snapshot_hash}.json
 
 A manifest records query args, row count, per-file SHA-256, pull time, SDK version and the
 schema version. A snapshot is a set of manifests (one per dataset); its hash is what a run
 references, never "latest".
+
+Files are immutable: every write goes to a new ``pull=`` directory and its manifest is written
+last, so a later pull never changes (or half-writes) a file an existing snapshot points to.
+Lakes written before this layout keep their files at ``{dataset}/date=...``; their manifests
+still resolve.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -92,7 +98,8 @@ class Lake:
         contract = CONTRACTS[(source, dataset)]
         df = conform(df, contract)  # same typing/dedup rules for every source (WRDS, BMLL, synthetic)
         check_contract(df, contract)
-        base = self.dataset_dir(source, dataset)
+        pull_id = f"{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}-{secrets.token_hex(3)}"
+        base = self.dataset_dir(source, dataset) / f"pull={pull_id}"
         files: dict[str, str] = {}
         if date_col is None:
             target = base / "static" / "part-0.parquet"
@@ -201,7 +208,14 @@ class Lake:
         return pl.read_parquet(paths)
 
     def partition_dates(self, source: str, dataset: str) -> list[date]:
-        base = self.dataset_dir(source, dataset)
-        if not base.exists():
+        """Dates in the latest pull of a dataset (from its manifest, not a directory listing)."""
+        m = self.latest_manifest(source, dataset)
+        if m is None:
             return []
-        return sorted(date.fromisoformat(p.name.split("=", 1)[1]) for p in base.glob("date=*"))
+        out = {
+            date.fromisoformat(part.split("=", 1)[1])
+            for rel in m["files"]
+            for part in Path(rel).parts
+            if part.startswith("date=")
+        }
+        return sorted(out)

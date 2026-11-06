@@ -64,3 +64,27 @@ def test_cash_in_lieu_and_delisting_keep_ledger_nav() -> None:
     led.delisting(ts, 0, 1, 151.0, 0.40, "DL")
     assert led.qty[0] == 0.0
     assert led.nav(np.array([np.nan])) == pytest.approx(1_000.0 + 10.0 + 151.0 * 0.40)
+
+
+def test_repull_leaves_existing_snapshots_intact(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # a re-pull used to overwrite {dataset}/date=.../part-0.parquet in place, so every older
+    # snapshot failed verification ("lake file ... is missing or changed since manifest")
+    import polars as pl
+
+    from simp.data.lake.store import Lake
+
+    lake = Lake(tmp_path)
+    cols = {"vwretd": [0.01, 0.02], "vwretx": [0.01, 0.02], "sprtrn": [0.0, 0.0], "spindx": [1.0, 2.0]}
+    first = pl.DataFrame({"caldt": [date(2024, 12, 30), date(2024, 12, 31)], **cols})
+    lake.write("crsp", "dsp500", first, date_col="caldt", query_args={}, sdk_version="t", data_label="CRSP")
+    old = lake.create_snapshot([("crsp", "dsp500")])
+    second = first.with_columns(pl.col("vwretd") * 2).vstack(
+        pl.DataFrame({"caldt": [date(2025, 1, 2)], **{k: [v[0]] for k, v in cols.items()}})
+    )
+    lake.write("crsp", "dsp500", second, date_col="caldt", query_args={}, sdk_version="t", data_label="CRSP")
+    new = lake.create_snapshot([("crsp", "dsp500")])
+    lake.verify_snapshot(old)
+    lake.verify_snapshot(new)
+    assert lake.read(old, "crsp", "dsp500")["vwretd"].to_list() == [0.01, 0.02]
+    assert lake.read(new, "crsp", "dsp500").height == 3
+    assert lake.partition_dates("crsp", "dsp500")[-1] == date(2025, 1, 2)

@@ -9,14 +9,31 @@ import { axisStyle, EChart } from "@/components/charts/EChart";
 import { type Col, DataTable } from "@/components/DataTable";
 import { Badge, Card, CardHeader, DataLabel, Empty, ErrorBox, Input, KV, Skeleton, Stat } from "@/components/ui";
 import { CATEGORICAL, INK, type Theme } from "@/lib/colors";
+import { getJson } from "@/lib/api/client";
 import { useJson } from "@/lib/hooks";
 import { bps, num, pct, px } from "@/lib/format";
 
 export default function MarketPage() {
-  const [permno, setPermno] = useQueryState("permno", parseAsString.withDefault("10001"));
+  const [permno, setPermno] = useQueryState("permno", parseAsString.withDefault(""));
   const [date, setDate] = useQueryState("date", parseAsString.withDefault(""));
-  const q = useJson(["market", permno, date], permno ? `/securities/${permno}/market` : null, { date: date || undefined });
+  // no ?permno=: open on the largest index member of the current snapshot (PERMNOs differ by data source)
+  const def = useJson<{ permno: number; ticker: string }>(["security-default"], permno ? null : "/securities/default");
+  const shown = permno || (def.data ? String(def.data.permno) : "");
+  const [draft, setDraft] = React.useState(shown);
+  const [lookupError, setLookupError] = React.useState<string | null>(null);
+  React.useEffect(() => setDraft(shown), [shown]);
+  const q = useJson(["market", shown, date], shown ? `/securities/${shown}/market` : null, { date: date || undefined });
   const d = q.data;
+  async function go(value: string) {
+    const v = value.trim();
+    setLookupError(null);
+    if (!v || v === shown) return;
+    if (/^\d+$/.test(v)) return void setPermno(v);
+    const r = await getJson<{ securities: { permno: number; ticker: string }[] }>("/search", { q: v });
+    const hit = r.securities.find((x) => x.ticker.toUpperCase() === v.toUpperCase()) ?? r.securities[0];
+    if (hit) setPermno(String(hit.permno));
+    else setLookupError(`no security matches "${v}"`);
+  }
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -25,12 +42,12 @@ export default function MarketPage() {
           <p className="text-sm text-ink-2">Derived BMLL daily figures per security and date, venue shares and the PERMNO ↔ ListingId mapping history. Raw rows stay in the lake.</p>
         </div>
         <div className="flex items-end gap-2">
-          <label className="flex flex-col gap-1"><span className="text-[10px] uppercase text-ink-3">PERMNO</span><Input value={permno} onChange={(e) => setPermno(e.target.value)} className="h-8 w-28" /></label>
+          <label className="flex flex-col gap-1"><span className="text-[10px] uppercase text-ink-3">PERMNO or ticker</span><Input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && go(draft)} onBlur={() => go(draft)} className="h-8 w-28" /></label>
           <label className="flex flex-col gap-1"><span className="text-[10px] uppercase text-ink-3">Date</span><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="h-8 w-40" /></label>
         </div>
       </div>
-      {q.isLoading && <Skeleton className="h-96" />}
-      {q.error && <ErrorBox error={q.error} title="Security not available" />}
+      {(q.isLoading || def.isLoading) && <Skeleton className="h-96" />}
+      {(q.error || def.error || lookupError) && <ErrorBox error={q.error ?? def.error ?? lookupError} title="Security not available" />}
       {d && (
         <>
           <div className="flex flex-wrap items-center gap-2">

@@ -61,6 +61,19 @@ def search(q: str, _: User = Depends(current_user)) -> dict[str, Any]:
     return out
 
 
+@router.get("/securities/default")
+def default_security(_: User = Depends(current_user)) -> dict[str, Any]:
+    """The security the market explorer opens on: the largest index member on the last session
+    of the latest snapshot (PERMNOs differ between synthetic and live data)."""
+    md = market_data()
+    if md is None:
+        raise HTTPException(409, "no data snapshot — Data -> Pull first")
+    i = md.D - 1
+    cap = np.nan_to_num(md.prc[i]) * np.nan_to_num(md.shrout[i])
+    j = int(np.argmax(np.where(md.member[i], cap, 0.0) if md.member[i].any() else cap))
+    return {"permno": int(md.permnos[j]), "ticker": md.tickers[j]}
+
+
 @router.get("/securities/{permno}/market")
 def security_market(
     permno: int,

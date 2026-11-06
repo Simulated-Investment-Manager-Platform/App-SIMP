@@ -242,7 +242,9 @@ def execute(run_id: str) -> str:
         emit(run_id, "done", {"output_hash": oh, "seconds": round(time.time() - t0, 2)})
         log.info("run.done", output_hash=oh, seconds=round(time.time() - t0, 2))
         return oh
-    except Exception as e:
+    # BaseException: a Rust panic inside polars/pyarrow (pyo3 PanicException) is not an
+    # Exception; without this the run row stays PREPARING/RUNNING forever. Always re-raised.
+    except BaseException as e:
         err = {
             "type": type(e).__name__,
             "message": str(e),

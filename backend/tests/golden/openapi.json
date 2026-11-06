@@ -3441,6 +3441,30 @@
     ]
    }
   },
+  "/api/securities/default": {
+   "get": {
+    "description": "The security the market explorer opens on: the largest index member on the last session\nof the latest snapshot (PERMNOs differ between synthetic and live data).",
+    "operationId": "default_security_api_securities_default_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Default Security Api Securities Default Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "Default Security",
+    "tags": [
+     "market"
+    ]
+   }
+  },
   "/api/securities/{permno}/market": {
    "get": {
     "operationId": "security_market_api_securities__permno__market_get",
