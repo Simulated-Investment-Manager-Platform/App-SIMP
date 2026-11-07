@@ -4,4 +4,5 @@ nav:
   - Overview: index.md
   - Setup from zero: setup-from-zero.md
   - Live data setup: live-data-setup.md
+  - Run guide: run-guide.md
   - Operations: operations.md
