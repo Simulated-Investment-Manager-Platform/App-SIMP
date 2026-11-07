@@ -107,7 +107,11 @@ uv run simp data pull --source live --crsp-only --start 2022-03-01 --end 2026-07
 uv run simp data export-isins --out isins.csv
 ```
 
-ISIN = `US` + CUSIP9 + check digit, one row per `stksecurityinfohist` interval, so CUSIP changes are covered.
+ISIN = `US` + CUSIP9 + check digit, one row per (permno, ticker, ISIN), so CUSIP and ticker changes are covered.
+That ISIN is wrong for foreign-domiciled issuers: a CINS CUSIP (Linde `G54950103`, Accenture, Medtronic,
+Chubb, ...; real ISINs `IE…`, `CH…`, `JE…`) or a foreign ISIN on a US-format CUSIP (Schlumberger
+`AN8068571086`). About 3% of S&P 500 weight. The puller looks those names up by ticker instead, and
+SIMP accepts a ticker match only when BMLL's closing price equals the CRSP close within 1 bp.
 
 ---
 
@@ -129,7 +133,13 @@ cd ../..
 It runs three steps and prints row counts and columns:
 
 1. `bmll.reference.query(object_type="Listing", ISIN=[...])` → `reference_listing.parquet`
-   (primary listing on the OPOL, the `@SIP` listing and siblings).
+   (primary listing on the OPOL, the `@SIP` listing and siblings), then the same query with `Ticker=[...]`
+   for every security none of whose ISINs BMLL knows. Ticker-found listings are queued after the ISIN ones,
+   so a re-run reuses the saved batches of an earlier pull and only fetches the new names.
+   BMLL's reference keeps only each listing's latest primary flag, so after a venue move (Linde NYSE → Nasdaq
+   2023-11-07, Walmart, Kimberly-Clark, Etsy, ...) the old venue is no longer "primary". The puller also pulls
+   the listing on every venue CRSP names as primary inside the window, and SIMP maps each CRSP interval to
+   its venue's listing once that listing's closes match CRSP's (method `ISIN_CRSP_VENUE`).
 2. `bmll.time_series.query(metric=[VWAP, TWAP, ClosingAuctionPrice|Executed, Spread|RelTWA, Volatility|Intraday, SweepToFill|*, AuctionOrderImbalance|*, AuctionDislocation|ClosingLast, Volume], frequency="D")` on the primary listings → `daily_analytics.parquet`.
 3. `bmll.time_series.classified_trades(notional_currency="USD")` → `classified_trades.parquet`.
    This supplies closing-auction volume (`LIT_CLOSING_AUCTION`), the venue mix by `ExecutionVenue`, and the volume for ADV.

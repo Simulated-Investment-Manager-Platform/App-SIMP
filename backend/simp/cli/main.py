@@ -173,7 +173,10 @@ def export_t2_needs(run: str, out: Path = typer.Option(Path("t2_needs.csv"))) ->
 @data_app.command("export-isins")
 def export_isins(out: Path = typer.Option(Path("isins.csv"))) -> None:
     """Write the ISINs (US + CUSIP9 + check digit) of every CRSP security in the last CRSP pull,
-    for the BMLL puller's reference lookup."""
+    for the BMLL puller's reference lookup. One row per (permno, ticker, ISIN, primary exchange):
+    foreign issuers' ISINs are not US + CUSIP, so the puller looks those names up by ticker and
+    needs every ticker, and it pulls the listing on each venue CRSP names as primary (Linde moved
+    NYSE -> Nasdaq in Nov 2023; BMLL's reference only flags its current primary)."""
     import polars as pl
 
     from simp.data.lake.store import Lake
@@ -189,12 +192,23 @@ def export_isins(out: Path = typer.Option(Path("isins.csv"))) -> None:
 
     si = pl.read_parquet([str(lake.root / f) for f in m["files"]])
     rows = []
-    for p, t, c9, c8, x in si.select("permno", "ticker", "cusip9", "cusip", "primaryexch").iter_rows():
+    cols = ("permno", "ticker", "cusip9", "cusip", "primaryexch", "secinfostartdt", "secinfoenddt")
+    for p, t, c9, c8, x, d0, d1 in si.select(*cols).iter_rows():
         c = cusip9_of(c9, c8)
         if c:
-            rows.append({"permno": p, "ticker": t, "isin": isin_from_cusip9(c), "primaryexch": x})
-    pl.DataFrame(rows).unique("isin").write_csv(out)
-    typer.echo(f"wrote {out} ({len(rows)} ISIN rows)")
+            rows.append(
+                {
+                    "permno": p,
+                    "ticker": t,
+                    "isin": isin_from_cusip9(c),
+                    "primaryexch": x,
+                    "valid_from": d0,
+                    "valid_to": d1,
+                }
+            )
+    df = pl.DataFrame(rows).unique(maintain_order=True)
+    df.write_csv(out)
+    typer.echo(f"wrote {out} ({df.height} rows, {df['isin'].n_unique()} ISINs)")
 
 
 @data_app.command("register-vendor-tr")

@@ -190,12 +190,27 @@ REF_MICS = ["XNYS", "XNAS", "ARCX", "BATS", "XASE", "@SIP"]  # primary venues (O
 
 
 def reference_by_isin(isins: list[str], start: date, end: date) -> pd.DataFrame:
-    """Listing reference data as validity intervals.
+    """Listing reference data for these ISINs, as validity intervals."""
+    return _reference("ISIN", isins, start, end)
 
-    ``reference.query`` over a date range returns one row per listing per day (millions of rows
+
+def reference_by_ticker(tickers: list[str], start: date, end: date) -> pd.DataFrame:
+    """Listing reference data for these tickers (CRSP style, ``BRK.B``), as validity intervals.
+
+    For issuers whose ISIN is not ``US`` + CUSIP: foreign-domiciled S&P 500 members (CINS CUSIPs
+    such as Linde ``G54950103``, real ISIN ``IE000S9YS762``) and US-format CUSIPs with a foreign
+    ISIN (Schlumberger ``AN8068571086``). A ticker can be reused by another company, so SIMP
+    accepts a ticker match only when the BMLL closing price agrees with the CRSP close."""
+    return _reference("Ticker", [t.replace(".", " ") for t in tickers], start, end)
+
+
+def _reference(field: str, values: list[str], start: date, end: date) -> pd.DataFrame:
+    """``reference.query`` over a date range returns one row per listing per day (millions of rows
     for four years), so instead query monthly snapshots on the primary venues + @SIP and collapse
     them: each (ListingId, ISIN, Ticker) gets ValidFrom/ValidTo from the snapshots it appears in.
     """
+    import hashlib
+
     import bmll
 
     days = pd.bdate_range(start, end, freq="BMS").date.tolist()
@@ -208,15 +223,20 @@ def reference_by_isin(isins: list[str], start: date, end: date) -> pd.DataFrame:
         d = day_batch[0]
         frames = [
             bmll.reference.query(
-                start_date=d, end_date=d, object_type="Listing", ISIN=isins[i : i + 200], MIC=REF_MICS
+                start_date=d, end_date=d, object_type="Listing", MIC=REF_MICS, **{field: values[i : i + 200]}
             )
-            for i in range(0, len(isins), 200)
+            for i in range(0, len(values), 200)
         ]
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         df["SnapDate"] = d
         return df
 
-    raw = _rename(_batched("reference", days, 1, snapshot))
+    # batches are one snapshot day each, so the query values go in the name: a run with another
+    # ISIN or ticker list must not reuse these chunks
+    tag = hashlib.md5(repr((field, values)).encode()).hexdigest()[:6]
+    raw = _rename(_batched(f"reference_{field.lower()}_{tag}", days, 1, snapshot))
+    if raw.empty:
+        return raw
     keys = [c for c in ("ListingId", "ISIN", "Ticker") if c in raw.columns]
     agg = (
         raw.groupby(keys, dropna=False)
@@ -526,18 +546,41 @@ def main() -> None:
     CHUNKS = out / "_chunks"
     CHUNKS.mkdir(exist_ok=True)
     s, e = date.fromisoformat(a.start), date.fromisoformat(a.end)
-    isins = pd.read_csv(a.isins)["isin"].dropna().astype(str).unique().tolist()
+    spec = pd.read_csv(a.isins)
+    isins = spec["isin"].dropna().astype(str).unique().tolist()
 
     print(f"1/3 reference lookup for {len(isins)} ISINs", flush=True)
-    ref = reference_by_isin(isins, s, e)
+    ref_i = reference_by_isin(isins, s, e)
+    tickers = unmatched_tickers(spec, set(ref_i["ISIN"].dropna().astype(str)) if len(ref_i) else set())
+    print(f"  ticker fallback for {len(tickers)} tickers whose ISIN BMLL does not know", flush=True)
+    ref_t = reference_by_ticker(tickers, s, e) if tickers else pd.DataFrame()
+    if len(ref_t):
+        ref_t = ref_t[~ref_t["ListingId"].isin(ref_i["ListingId"])]
+    ref = pd.concat([ref_i, ref_t], ignore_index=True)
     ref.to_parquet(out / "reference_listing.parquet")
-    prim = (
-        ref[(ref["IsPrimary"]) & (ref["MIC"] == ref["OPOL"])]
-        if {"IsPrimary", "OPOL"} <= set(ref.columns)
-        else ref
+
+    def primaries(r: pd.DataFrame) -> pd.DataFrame:
+        if not len(r):
+            return r
+        return r[(r["IsPrimary"]) & (r["MIC"] == r["OPOL"])] if {"IsPrimary", "OPOL"} <= set(r.columns) else r
+
+    def ids(r: pd.DataFrame) -> list[int]:
+        return sorted(r["ListingId"].astype(int).unique().tolist()) if len(r) else []
+
+    # ISIN-matched listings first, ticker-matched ones after: batches are cut from this list in
+    # order, so the batches an earlier ISIN-only pull saved stay valid and only the new ones run
+    lids_i = ids(primaries(ref_i))
+    lids = lids_i + [x for x in ids(primaries(ref_t)) if x not in set(lids_i)]
+    n_prim = len(lids)
+    # then listings on a venue CRSP names as primary that BMLL's reference does not flag: the
+    # reference keeps each listing's latest flags, so a venue move (Linde NYSE -> Nasdaq,
+    # 2023-11-07) would otherwise leave the earlier venue's daily figures unpulled
+    lids += [x for x in crsp_venue_listings(spec, ref, s, e) if x not in set(lids)]
+    print(
+        f"reference: {len(ref)} listing rows, {n_prim} primary listings ({n_prim - len(lids_i)} by ticker), "
+        f"{len(lids) - n_prim} more on CRSP's primary venue",
+        flush=True,
     )
-    lids = sorted(prim["ListingId"].astype(int).unique().tolist())
-    print(f"reference: {len(ref)} listing rows, {len(lids)} primary listings", flush=True)
 
     print("2/3 daily analytics", flush=True)
     METRIC_MAP.update(resolve_metrics(lids[0], out))
@@ -547,12 +590,18 @@ def main() -> None:
     print("3/3 classified trades", flush=True)
     # US trade data (and so classified trades) lives on the @SIP listing; the real venue is in
     # ExecutionVenue. SIMP maps @SIP rows back to the primary listing when it builds market_daily.
-    sip = (
-        ref[(ref["MIC"] == "@SIP") & ref["InstrumentId"].isin(prim["InstrumentId"])]
-        if "InstrumentId" in ref.columns
-        else ref[ref["MIC"] == "@SIP"]
-    )
-    sip_ids = sorted(sip["ListingId"].astype(int).unique().tolist())
+    def sips(r: pd.DataFrame) -> list[int]:
+        if not len(r):
+            return []
+        p = primaries(r)
+        x = r[(r["MIC"] == "@SIP") & r["InstrumentId"].isin(p["InstrumentId"])] if "InstrumentId" in r.columns else r[r["MIC"] == "@SIP"]
+        return ids(x)
+
+    sip_i = sips(ref_i)
+    sip_ids = sip_i + [x for x in sips(ref) if x not in set(sip_i)]  # same order rule as lids
+    if "InstrumentId" in ref.columns:  # the @SIP listing of any instrument pulled only for its venue
+        inst = ref.loc[ref["ListingId"].isin(lids), "InstrumentId"]
+        sip_ids += [x for x in ids(ref[(ref["MIC"] == "@SIP") & ref["InstrumentId"].isin(inst)]) if x not in set(sip_ids)]
     print(f"  querying {len(sip_ids)} @SIP listings", flush=True)
     rows, labels = classified_trades(sip_ids, s, e, out / "classified_trades.parquet")
     print(f"classified trades: {rows:,} rows written to {out / 'classified_trades.parquet'}", flush=True)
@@ -560,8 +609,44 @@ def main() -> None:
     if not rows:
         print("  WARNING: no classified trades returned: check the account's classified-trades entitlement", flush=True)
     (out / "pull_spec.json").write_text(
-        json.dumps({"start": a.start, "end": a.end, "isins": len(isins), "listings": len(lids)})
+        json.dumps(
+            {"start": a.start, "end": a.end, "isins": len(isins), "tickers": len(tickers), "listings": len(lids)}
+        )
     )
+
+
+# CRSP primary exchange codes -> MIC; mirrors simp.data.mapping.isin.EXCH_TO_MIC (this env cannot import simp)
+EXCH_TO_MIC = {"N": "XNYS", "Q": "XNAS", "A": "XASE", "P": "ARCX", "R": "ARCX", "Z": "BATS", "B": "BATS", "I": "IEXG"}
+
+
+def crsp_venue_listings(spec: pd.DataFrame, ref: pd.DataFrame, start: date, end: date) -> list[int]:
+    """Listings on the MIC CRSP gives as primary for a spec row whose CRSP interval overlaps the
+    pull window, matched by ISIN or ticker."""
+    if not len(ref) or not {"primaryexch", "valid_from"} <= set(spec.columns):
+        return []
+    d0 = pd.to_datetime(spec["valid_from"]).dt.date
+    d1 = pd.to_datetime(spec["valid_to"]).dt.date.where(spec["valid_to"].notna(), date(9999, 12, 31))
+    spec = spec[(d0 <= end) & (d1 >= start)]
+    r = ref.assign(_t=ref["Ticker"].astype(str).str.replace(" ", ".", regex=False))
+    out: set[int] = set()
+    for isin, ticker, code in spec[["isin", "ticker", "primaryexch"]].itertuples(index=False):
+        code = str(code).strip().upper() if isinstance(code, str) else ""
+        mic = EXCH_TO_MIC.get(code)
+        if mic is None:
+            continue
+        hit = r[(r["MIC"] == mic) & ((r["ISIN"].astype(str) == str(isin)) | (r["_t"] == str(ticker)))]
+        out |= set(hit["ListingId"].astype(int))
+    return sorted(out)
+
+
+def unmatched_tickers(spec: pd.DataFrame, found_isins: set[str]) -> list[str]:
+    """Tickers of the securities (permnos) none of whose ISINs BMLL returned."""
+    if "ticker" not in spec.columns:
+        return []
+    key = "permno" if "permno" in spec.columns else "ticker"
+    hit = set(spec.loc[spec["isin"].astype(str).isin(found_isins), key])
+    miss = spec[~spec[key].isin(hit)]
+    return sorted({str(t).strip() for t in miss["ticker"].dropna() if str(t).strip()})
 
 
 if __name__ == "__main__":

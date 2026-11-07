@@ -185,6 +185,140 @@ def test_mapping_with_missing_cusip9() -> None:
     assert res.review_queue["permno"].to_list() == [2]
 
 
+def test_foreign_issuer_maps_by_ticker_with_price_check() -> None:
+    """A CINS CUSIP (Linde, G54950103) has no ``US`` ISIN: BMLL lists it under IE000S9YS762, so the
+    ISIN lookup misses and the ticker fallback maps it once the closes agree; a reused ticker whose
+    closes disagree goes to the review queue."""
+    from simp.data.mapping.builder import build_security_map
+
+    days = [date(2024, 1, d) for d in (2, 3, 4, 5, 8, 9, 10)]
+    secinfo = pl.DataFrame(
+        {
+            "permno": [18143, 99],
+            "secinfostartdt": [date(2023, 3, 1), date(2023, 3, 1)],
+            "secinfoenddt": [date(9999, 12, 31)] * 2,
+            "ticker": ["LIN", "XYZ"],
+            "cusip": ["G5495010", "G1234510"],
+            "cusip9": ["G54950103", None],
+            "primaryexch": ["Q", "N"],
+        }
+    )
+    ref = pl.DataFrame(
+        {
+            "ListingId": [10, 11, 20],
+            "InstrumentId": [5, 5, 7],
+            "ISIN": ["IE000S9YS762", "IE000S9YS762", "US0000000000"],
+            "FIGI": ["F", "F", "G"],
+            "Ticker": ["LIN", "LIN", "XYZ"],
+            "MIC": ["XNAS", "@SIP", "XNYS"],
+            "OPOL": ["XNAS", "XNAS", "XNYS"],
+            "IsPrimary": [True, False, True],
+            "ValidFrom": [date(2023, 3, 1)] * 3,
+            "ValidTo": [date(9999, 12, 31)] * 3,
+        }
+    )
+    crsp = pl.DataFrame(
+        {"permno": [18143] * 7 + [99] * 7, "dlycaldt": days * 2, "dlyprc": [470.0 + i for i in range(7)] * 2}
+    )
+    bmll = pl.DataFrame(
+        {
+            "ListingId": [10] * 7 + [20] * 7,
+            "Date": days * 2,
+            "close": [470.0 + i for i in range(7)] + [12.0] * 7,  # XYZ: another company, other prices
+        }
+    )
+    res = build_security_map(secinfo, ref, crsp, bmll)
+    sm = res.security_map
+    assert sm["permno"].to_list() == [18143]
+    assert sm["method"].to_list() == ["TICKER_PRICE_CHECK"]
+    assert sm["listing_id"].to_list() == [10] and sm["sip_listing_id"].to_list() == [11]
+    assert sm["isin"].to_list() == ["IE000S9YS762"]
+    assert res.review_queue["permno"].to_list() == [99]
+
+
+def _venue_move_fixture(isin: str, cusip9: str):  # type: ignore[no-untyped-def]
+    """CRSP: NYSE until 2023-11-06, Nasdaq from 2023-11-07. BMLL's reference flags only the current
+    primary (XNAS) for the whole history; NYSE closes exist before the move, Nasdaq ones after."""
+    pre = [date(2023, 3, 2)] + [date(2023, 10, d) for d in (2, 3, 4, 5, 6, 9)]  # trades from day one
+    post = [date(2023, 11, d) for d in (7, 8, 9, 10, 13, 14, 15)]
+    secinfo = pl.DataFrame(
+        {
+            "permno": [7, 7],
+            "secinfostartdt": [date(2023, 3, 2), date(2023, 11, 7)],
+            "secinfoenddt": [date(2023, 11, 6), date(9999, 12, 31)],
+            "ticker": ["LIN", "LIN"],
+            "cusip": [cusip9[:8]] * 2,
+            "cusip9": [cusip9] * 2,
+            "primaryexch": ["N", "Q"],
+        }
+    )
+    ref = pl.DataFrame(
+        {
+            "ListingId": [30, 31, 32],
+            "InstrumentId": [9, 9, 9],
+            "ISIN": [isin] * 3,
+            "FIGI": ["F"] * 3,
+            "Ticker": ["LIN"] * 3,
+            "MIC": ["XNYS", "XNAS", "@SIP"],
+            "OPOL": ["XNAS"] * 3,
+            "IsPrimary": [False, True, False],
+            "ValidFrom": [date(2023, 4, 3)] * 3,
+            "ValidTo": [date(9999, 12, 31)] * 3,
+        }
+    )
+    px = [400.0 + i for i in range(7)]
+    crsp = pl.DataFrame({"permno": [7] * 14, "dlycaldt": pre + post, "dlyprc": px + px})
+    bmll = pl.DataFrame(
+        {"ListingId": [30] * 7 + [31] * 7, "Date": pre + post, "close": px + px},
+        schema={"ListingId": pl.Int64, "Date": pl.Date, "close": pl.Float64},
+    )
+    return secinfo, ref, crsp, bmll
+
+
+def test_venue_move_maps_each_crsp_interval_to_its_venue() -> None:
+    """Linde (CINS CUSIP, ticker path) and a US ISIN name that moved venue (Walmart-style): before
+    the move the NYSE listing, after it the Nasdaq one, one listing per day."""
+    from simp.data.mapping.builder import build_security_map, validate_mapping
+
+    for isin, cusip9, method in (
+        ("IE000S9YS762", "G54950103", "TICKER_PRICE_CHECK"),
+        ("US9311421039", "931142103", "ISIN_CRSP_VENUE"),
+    ):
+        secinfo, ref, crsp, bmll = _venue_move_fixture(isin, cusip9)
+        res = build_security_map(secinfo, ref, crsp, bmll)
+        sm = res.security_map
+        got = [(r["listing_id"], r["opol"], r["valid_from"], r["valid_to"]) for r in sm.iter_rows(named=True)]
+        assert got == [
+            (30, "XNYS", date(2023, 3, 2), date(2023, 11, 6)),
+            (31, "XNAS", date(2023, 11, 7), date(9999, 12, 31)),
+        ], isin
+        assert sm["method"][0] == method and sm["sip_listing_id"].to_list() == [32, 32]
+        needs = crsp.select("permno", pl.col("dlycaldt").alias("date"))
+        assert validate_mapping(sm, needs).height == 0
+        assert res.review_queue.height == 0
+
+
+def test_overlapping_listings_give_one_mapping_per_day() -> None:
+    """Bunge: the Bermuda listing's snapshot interval runs to 2023-10-31 and the Swiss successor
+    trades from 2023-10-31; the later listing wins from its start, so each day has one listing."""
+    from simp.data.mapping.builder import _one_listing_per_day
+
+    old = {"listing_id": 1, "valid_from": date(2019, 9, 17), "valid_to": date(2023, 10, 31)}
+    new = {"listing_id": 2, "valid_from": date(2023, 10, 31), "valid_to": date(2026, 6, 30)}
+    out = _one_listing_per_day([new, old])
+    assert [(r["listing_id"], r["valid_from"], r["valid_to"]) for r in out] == [
+        (1, date(2019, 9, 17), date(2023, 10, 30)),
+        (2, date(2023, 10, 31), date(2026, 6, 30)),
+    ]
+    inner = {"listing_id": 3, "valid_from": date(2021, 1, 1), "valid_to": date(2021, 1, 31)}
+    out = _one_listing_per_day([old, inner])
+    assert [(r["listing_id"], r["valid_from"], r["valid_to"]) for r in out] == [
+        (1, date(2019, 9, 17), date(2020, 12, 31)),
+        (3, date(2021, 1, 1), date(2021, 1, 31)),
+        (1, date(2021, 2, 1), date(2023, 10, 31)),
+    ]
+
+
 class _FakeWrds:
     """Stands in for WRDS: ``tables`` maps schema.table to the columns it has."""
 

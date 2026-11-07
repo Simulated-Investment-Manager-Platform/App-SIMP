@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import polars as pl
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from simp.data.lake.store import Lake
@@ -169,6 +169,23 @@ def seed_reviews(snapshot: str, engine: Engine | None = None) -> dict[str, int]:
         ]
         _upsert(eng, S.mapping_review, mrows, ["permno", "valid_from"])
         n_map = len(mrows)
+        # An OPEN item the new snapshot no longer queues was resolved by the data (e.g. a foreign
+        # issuer now mapped by ticker): drop it. Reviewed items (FIXED / EXCLUDED) are kept.
+        keep = {(r["permno"], r["valid_from"]) for r in mrows}
+        mr = S.mapping_review
+        with eng.begin() as c:
+            stale = [
+                k
+                for k in c.execute(select(mr.c.permno, mr.c.valid_from).where(mr.c.status == "OPEN")).all()
+                if (k[0], k[1]) not in keep
+            ]
+            for i in range(0, len(stale), 1000):
+                c.execute(
+                    delete(mr).where(
+                        mr.c.status == "OPEN",
+                        tuple_(mr.c.permno, mr.c.valid_from).in_([tuple(k) for k in stale[i : i + 1000]]),
+                    )
+                )
     with eng.connect() as c:
         pending = c.execute(
             select(S.corporate_action.c.permno).where(S.corporate_action.c.review_status == "PENDING")
