@@ -338,3 +338,34 @@ def test_t2_fetches_missing_bars_on_demand(tmp_path) -> None:  # type: ignore[no
     cache2, fills2 = run()  # same lake: everything is cached now
     assert len(calls) == n_calls and cache2.audit_hash() == cache.audit_hash()
     assert [(f.price, f.quantity) for f in fills2] == [(f.price, f.quantity) for f in fills]
+
+
+def test_live_source_never_picks_a_synthetic_snapshot(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """With SIMP_DATA_SOURCE=live, a synthetic snapshot made after the live one is ignored."""
+    from types import SimpleNamespace
+
+    from simp.data.lake.store import Lake
+    from simp.data.pull import SNAPSHOT_DATASETS, build_derived, pull_live, write_raw
+    from simp.data.synthetic.generator import generate
+    from simp.runs import orchestrator
+
+    w = generate(3, date(2025, 6, 2), date(2026, 3, 31))
+    lake = Lake(tmp_path)
+    write_raw(lake, {k: v for k, v in w.tables.items() if k[0] == "crsp"}, "CRSP", {}, "test")
+    write_raw(
+        lake,
+        {k: v for k, v in w.tables.items() if k[0] == "bmll" and k[1] != "auction_imbalance"},
+        "BMLL",
+        {},
+        "test",
+    )
+    live = pull_live(lake, date(2025, 6, 2), date(2026, 3, 31), reuse_crsp=True)
+    write_raw(lake, w.tables, "SYNTHETIC", {"seed": 3}, "test")
+    build_derived(lake, w.tables, "SYNTHETIC", {"seed": 3})
+    synth = lake.create_snapshot(SNAPSHOT_DATASETS)
+    assert lake.snapshots()[-1]["snapshot_hash"] == synth != live
+    monkeypatch.setattr(orchestrator, "Lake", lambda: Lake(tmp_path))
+    monkeypatch.setattr(orchestrator, "get_settings", lambda: SimpleNamespace(data_source="live"))
+    assert orchestrator.latest_snapshot() == live
+    monkeypatch.setattr(orchestrator, "get_settings", lambda: SimpleNamespace(data_source="synthetic"))
+    assert orchestrator.latest_snapshot() == synth

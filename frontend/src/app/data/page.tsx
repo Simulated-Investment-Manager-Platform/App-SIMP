@@ -78,11 +78,16 @@ function Lake({ cov }: { cov: any }) {
 function Jobs() {
   const qc = useQueryClient();
   const jobs = useJson(["jobs"], "/data/jobs", undefined, { refetch: 3000 });
-  const [source, setSource] = React.useState("synthetic");
+  const cov = useJson(["coverage"], "/data/coverage");
+  const [source, setSource] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    // default to the configured source (SIMP_DATA_SOURCE), never silently to synthetic
+    if (source === null && cov.data?.data_source) setSource(cov.data.data_source);
+  }, [cov.data, source]);
   const [seed, setSeed] = React.useState("20260321");
   const pull = async () => {
     try {
-      const r = await sendJson("POST", "/data/pull", { source, seed: Number(seed), start: "2022-03-01", end: "2026-07-31" });
+      const r = await sendJson("POST", "/data/pull", { source: source ?? cov.data?.data_source, seed: Number(seed), start: "2022-03-01", end: "2026-07-31" });
       toast.success(`Pull job ${r.job_id.slice(0, 10)} queued`);
       qc.invalidateQueries({ queryKey: ["jobs"] });
     } catch (e: any) {
@@ -105,7 +110,7 @@ function Jobs() {
         subtitle="CRSP directly from WRDS; BMLL via the SDK puller or a Data Lab job. Synthetic regenerates the schema-identical stand-in."
         right={
           <div className="flex items-center gap-2">
-            <Select value={source} onChange={(e) => setSource(e.target.value)}>
+            <Select value={source ?? ""} onChange={(e) => setSource(e.target.value)}>
               <option value="synthetic">synthetic</option>
               <option value="live">live (WRDS + BMLL)</option>
             </Select>

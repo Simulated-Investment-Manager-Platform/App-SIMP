@@ -116,9 +116,27 @@ def desk_policy_for(name: str) -> tuple[DeskPolicy, str]:
 
 
 def latest_snapshot() -> str:
-    snaps = Lake().snapshots()
+    """The newest snapshot, restricted to live (non-SYNTHETIC) data when SIMP_DATA_SOURCE=live,
+    so a synthetic pull made for testing can never be picked up by a live run."""
+    lake = Lake()
+    snaps = lake.snapshots()
     if not snaps:
         raise DataMissingError("no data snapshot in the lake — run `simp data pull` (or Data -> Pull) first")
+    if get_settings().data_source == "live":
+
+        def label(s: dict[str, Any]) -> str:
+            try:
+                return str(lake.manifest_for(str(s["snapshot_hash"]), "crsp", "dsf_v2")["data_label"])
+            except Exception:  # noqa: BLE001 - an unreadable snapshot is simply not a candidate
+                return "SYNTHETIC"
+
+        live = [s for s in snaps if label(s) != "SYNTHETIC"]
+        if not live:
+            raise DataMissingError(
+                "SIMP_DATA_SOURCE=live but the lake has only synthetic snapshots: run "
+                "`simp data pull --source live --reuse-crsp ...` first"
+            )
+        snaps = live
     return str(snaps[-1]["snapshot_hash"])
 
 
